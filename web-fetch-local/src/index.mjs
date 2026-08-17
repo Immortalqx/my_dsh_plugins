@@ -2,8 +2,15 @@
 //
 // Tool name (model-facing) : `web_fetch` (drop-in)
 // Plugin row id            : `web-fetch-local`
-// Args                     : `{ url, offset_bytes?, max_bytes? }`
-// Output                   : `{ url, statusCode, body, truncated, offsetBytes, totalBytes, bytes }`
+// Args                     : `{ url, max_bytes? }`
+// Output                   : `{ url, statusCode, bytes, totalBytes, truncated,
+//                               textChars, previewChars, fullPath, preview }`
+//
+// The tool returns a short preview inline (first ~2000 chars of the
+// extracted text). The full extracted text is always written to a cache
+// file under ~/.dsh/cache/web-fetch/ — the model can re-read it with the
+// built-in `str_replace_editor` `view` command when it needs the whole
+// page (long articles, references, etc.).
 //
 // Why Python (not Node fetch):
 //   1. Defence-in-depth — separate process boundary makes sandbox leakage
@@ -29,18 +36,10 @@ import { dirname, join } from 'node:path'
 const exec = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-// Bumped from shipped dsh-tool-web's 200_000. Tech blogs regularly run 300-800KB.
 const DEFAULT_MAX_BYTES = 500_000
 const HARD_MAX_BYTES = 2_000_000
 const HARD_MIN_BYTES = 5_000
 const DEFAULT_TIMEOUT_MS = 20_000  // subprocess timeout; fetch.py default is 15s
-
-// Cap on the complete rendered string. Matches shipped `web_fetch` default.
-// Render truncates to this length with a footer telling the agent the body
-// was cut, so it knows to call again with offset_bytes to fetch the rest.
-const MAX_OUTPUT_CHARS = 200_000
-const TRUNCATION_FOOTER =
-  '\n\n[output truncated to fit model context; pass `offset_bytes=<prev bytes>` to web_fetch to read more]'
 
 // Pick the Python interpreter. Override with DSH_WEB_FETCH_PYTHON if your
 // install uses a non-default name (e.g., `py` on Windows, `python3.12`, or a venv path).
@@ -55,12 +54,16 @@ export function apply(ctx) {
     name: 'web_fetch',
 
     description:
-      'Fetch the text content of an HTTP(S) URL. To paginate long pages: pass ' +
-      '`offset_bytes=<prev response bytes>` on every subsequent call. The response ' +
-      'is `truncated=true` while more content is available, `truncated=false` when ' +
-      'complete (you can stop). If you see the truncation footer in the output, ' +
-      'call again with `offset_bytes` to read the rest. Use AFTER web_search to read ' +
-      'full articles — do not fetch every search result, only the 1-3 you will cite.',
+      'Fetch the text content of an HTTP(S) URL. The response carries a short ' +
+      'preview inline (first ~2000 chars) plus the absolute path to a cache file ' +
+      'that holds the complete extracted text. ' +
+      'To read the FULL content: call `str_replace_editor` with `command="view"`, ' +
+      '`path=<fullPath>`, and `view_range=[1, -1]`. The `view_range=[1, -1]` is ' +
+      'REQUIRED for pages longer than ~16K characters because the read tool ' +
+      'otherwise truncates its output and you would mistakenly think this fetch ' +
+      'returned an incomplete page. For a specific window use `view_range=[<start>, <end>]`. ' +
+      'Use AFTER web_search to read full articles — do not fetch every search result, ' +
+      'only the 1-3 you will cite.',
 
     parameters: {
       url: {
@@ -68,17 +71,11 @@ export function apply(ctx) {
         required: true,
         description: 'Absolute http(s) URL to fetch.',
       },
-      offset_bytes: {
-        type: 'number',
-        description:
-          'Byte offset to start reading from. First call: 0. Subsequent calls: ' +
-          'pass the previous response.bytes value.',
-      },
       max_bytes: {
         type: 'number',
         description:
-          'Hard byte cap for this call (5000-2000000). Default 500000 (~500KB). ' +
-          'For short snippets pass ~50000; for huge pages pass 2000000.',
+          'Hard byte cap on the raw HTTP body (5000-2000000). Default 500000 ' +
+          '(~500KB). For short snippets pass ~50000; for huge pages pass 2000000.',
       },
     },
 
@@ -88,29 +85,27 @@ export function apply(ctx) {
         properties: {
           url: { type: 'string' },
           statusCode: { type: 'number' },
-          body: { type: 'string' },
-          truncated: { type: 'boolean' },
-          offsetBytes: { type: 'number' },
-          totalBytes: { type: 'number' },
           bytes: { type: 'number' },
+          totalBytes: { type: 'number' },
+          truncated: { type: 'boolean' },
+          textChars: { type: 'number' },
+          previewChars: { type: 'number' },
+          fullPath: { type: 'string' },
+          preview: { type: 'string' },
+          error: { type: 'string' },
         },
-        required: ['url', 'statusCode', 'body', 'truncated'],
+        required: ['url', 'statusCode', 'textChars'],
       },
       render(_args, value) {
-        if (value.statusCode >= 400 || !value.body) {
-          return [{ type: 'text', text: `${value.url} (HTTP ${value.statusCode})\nError: ${value.error || ''}` }]
+        if (!value.statusCode || value.statusCode >= 400) {
+          return [{ type: 'text', text: `${value.url} (HTTP ${value.statusCode || 'ERR'})\nError: ${value.error || ''}` }]
         }
-        const head = `${value.url} (HTTP ${value.statusCode}, ${value.bytes} bytes${value.truncated ? ', truncated' : ', complete'})`
-        const tail = value.truncated
-          ? `\n\nNEXT CALL: web_fetch(url="${value.url}", offset_bytes=${value.bytes})`
+        const head = `${value.url} (HTTP ${value.statusCode}, ${value.bytes} bytes, ${value.textChars} chars text${value.truncated ? ', truncated' : ', complete'})`
+        const cacheHint = value.fullPath
+          ? `\n\nFull content (${value.textChars} chars) saved to: ${value.fullPath}\n` +
+            `Read the whole file: str_replace_editor(command="view", path="${value.fullPath}", view_range=[1, -1])`
           : ''
-        let body = value.body
-        let suffix = ''
-        if (body.length > MAX_OUTPUT_CHARS) {
-          body = body.slice(0, MAX_OUTPUT_CHARS)
-          suffix = TRUNCATION_FOOTER
-        }
-        return [{ type: 'text', text: `${head}${tail}\n\n${body}${suffix}` }]
+        return [{ type: 'text', text: `${head}\n\n${value.preview}${cacheHint}` }]
       },
     },
 
@@ -119,7 +114,6 @@ export function apply(ctx) {
       if (!url) throw new Error('url must be a non-empty string')
       if (!/^https?:\/\//i.test(url)) throw new Error('url must start with http:// or https://')
 
-      const offsetBytes = Number.isFinite(args.offset_bytes) ? Math.max(0, Math.floor(args.offset_bytes)) : 0
       let maxBytes = Number.isFinite(args.max_bytes) ? Math.floor(args.max_bytes) : DEFAULT_MAX_BYTES
       if (maxBytes < HARD_MIN_BYTES) maxBytes = HARD_MIN_BYTES
       if (maxBytes > HARD_MAX_BYTES) maxBytes = HARD_MAX_BYTES
@@ -128,7 +122,6 @@ export function apply(ctx) {
       const cmdArgs = [
         scriptPath,
         '--url', url,
-        '--offset-bytes', String(offsetBytes),
         '--max-bytes', String(maxBytes),
         '--timeout', '15',
       ]
@@ -152,11 +145,13 @@ export function apply(ctx) {
         return {
           url: parsed.url || url,
           statusCode: parsed.status ?? 0,
-          body: parsed.text || '',
-          truncated: !!parsed.truncated,
-          offsetBytes: parsed.offset_bytes ?? offsetBytes,
-          totalBytes: parsed.total_bytes ?? 0,
           bytes: parsed.bytes ?? 0,
+          totalBytes: parsed.total_bytes ?? 0,
+          truncated: !!parsed.truncated,
+          textChars: parsed.text_chars ?? (parsed.preview ? parsed.preview.length : 0),
+          previewChars: parsed.preview_chars ?? (parsed.preview ? parsed.preview.length : 0),
+          fullPath: parsed.full_path || '',
+          preview: parsed.preview || '',
         }
       } catch (err) {
         if (err && err.name === 'AbortError') throw new Error('web_fetch: cancelled')

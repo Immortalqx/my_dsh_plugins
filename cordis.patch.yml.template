@@ -1,6 +1,6 @@
-# Cordis patch template. Replace __REPO_PATH__ with the absolute path of your
-# clone before dropping into ~/.dsh/profiles/web/cordis.patch.yml. The README
-# has the exact `sed` / PowerShell substitution commands for both platforms.
+# Cordis patch template. Substitute __REPO_PATH__ with the absolute path of
+# your ~/.dsh/plugins directory before installing. The README has the exact
+# install steps; this file's only role is to carry the placeholder token.
 
 - id: web-search-deepseek
   disabled: true

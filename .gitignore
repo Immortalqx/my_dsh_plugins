@@ -4,6 +4,10 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Python (fetch.py helper)
+__pycache__/
+*.pyc
+
 # Local development sandboxes (mirrored from dsh_agent_dev)
 audit/
 dev-sandbox/
