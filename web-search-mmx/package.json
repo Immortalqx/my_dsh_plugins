@@ -1,0 +1,14 @@
+{
+  "name": "dsh-web-search-mmx",
+  "version": "1.0.0",
+  "description": "`web_search` tool backed by local mmx-cli (MiniMax OAuth).",
+  "type": "module",
+  "main": "src/index.mjs",
+  "scripts": {
+    "test": "echo \"see README verification section\""
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

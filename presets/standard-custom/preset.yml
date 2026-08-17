@@ -1,0 +1,2 @@
+name: Standard (custom)
+description: Copy of shipped standard with `tool-web` disabled — `web_search` and `web_fetch` are provided by the host-scoped plugins registered in `~/.dsh/profiles/web/cordis.patch.yml` (mmx-cli for `web_search`, Python urllib for `web_fetch`) instead of the shipped DeepSeek-billed `dsh-tool-web`.

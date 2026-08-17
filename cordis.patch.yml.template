@@ -1,0 +1,18 @@
+# Cordis patch template. Replace __REPO_PATH__ with the absolute path of your
+# clone before dropping into ~/.dsh/profiles/web/cordis.patch.yml. The README
+# has the exact `sed` / PowerShell substitution commands for both platforms.
+
+- id: web-search-deepseek
+  disabled: true
+
+- id: tool-web
+  disabled: true
+
+- insert:
+    - id: web-search-mmx
+      name: 'file://__REPO_PATH__/web-search-mmx/src/index.mjs'
+      inject: ['tools']
+
+    - id: web-fetch-local
+      name: 'file://__REPO_PATH__/web-fetch-local/src/index.mjs'
+      inject: ['tools']

@@ -1,0 +1,9 @@
+# Node / pnpm / build artifacts
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local development sandboxes (mirrored from dsh_agent_dev)
+audit/
+dev-sandbox/

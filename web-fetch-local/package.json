@@ -1,0 +1,14 @@
+{
+  "name": "dsh-web-fetch-local",
+  "version": "1.0.0",
+  "description": "`web_fetch` tool backed by local Python urllib + SSRF blocklist (any public host is allowed).",
+  "type": "module",
+  "main": "src/index.mjs",
+  "scripts": {
+    "test": "python src/fetch.py --url https://github.com 2>&1 | python -c \"import sys,json; r=json.loads(sys.stdin.read().splitlines()[0]); assert r['ok']==True, r; print('SSRF-blocked test OK')\""
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
