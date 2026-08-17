@@ -4,7 +4,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 
-# Python (fetch.py helper)
+# Python (fetch.py helper + install.py)
 __pycache__/
 *.pyc
 

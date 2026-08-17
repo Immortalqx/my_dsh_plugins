@@ -4,22 +4,20 @@
 
 ## Install
 
-Three file copies plus a one-line substitution. Plugin source goes into DSH's home directory; the rendered `cordis.patch.yml` references those copies with absolute `file://` URLs.
-
 ```bash
-DEST="$HOME/.dsh/plugins"
-
-mkdir -p "$DEST"
-cp -r web-search-mmx  "$DEST/web-search-mmx"
-cp -r web-fetch-local "$DEST/web-fetch-local"
-
-cp -r presets/standard-custom "$HOME/.dsh/.agent-presets/standard-custom"
-
-sed "s|__REPO_PATH__|$DEST|g" cordis.patch.yml.template \
-    > "$HOME/.dsh/profiles/web/cordis.patch.yml"
+python install.py
 ```
 
-After the install, the plugin repo is no longer needed at runtime. The rendered `~/.dsh/profiles/web/cordis.patch.yml` holds absolute `file://` URLs pointing to your copy under `~/.dsh/plugins/`.
+`install.py` auto-detects the host OS, force-overwrites this plugin's files (idempotent), and merges its rows into the existing `~/.dsh/profiles/web/cordis.patch.yml` — rows that belong to *other* plugins are preserved.
+
+Flags:
+- `--dry-run` — print the plan without writing anything
+- `--source <dir>` — repo root (default: this script's parent directory)
+- `--target-home <dir>` — override `$HOME` (for testing)
+
+Requirements: Python ≥ 3.10 + PyYAML (`pip install pyyaml`).
+
+After the install, the plugin repo is no longer needed at runtime.
 
 In the browser, F5 then Settings -> Agent preset -> custom -> pick "Standard (custom)".
 
@@ -90,7 +88,7 @@ This clone (the install source):
 ```
 my_dsh_plugins/
 - README.md
-- cordis.patch.yml.template
+- install.py
 - presets/standard-custom/{agent.cordis.yml, preset.yml}
 - web-search-mmx/{package.json, src/index.mjs}
 - web-fetch-local/{package.json, src/{index.mjs, fetch.py}}
@@ -111,9 +109,6 @@ After install (DSH-managed):
 ## Compatibility
 
 - DSH >=0.1.0-rc.6, Node >=18.0.0
+- install.py: Python ≥ 3.10 + PyYAML (`pip install pyyaml`)
 - web-fetch-local: Python >=3.10
 - web-search-mmx: `mmx` CLI on `PATH` (OAuth via `mmx auth login`)
-
-## License
-
- MIT
