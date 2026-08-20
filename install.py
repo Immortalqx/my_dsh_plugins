@@ -50,7 +50,7 @@ PROFILES_DIRNAME = "profiles"
 PROFILE_NAME = "web"
 PATCH_FILENAME = "cordis.patch.yml"
 PRESETS_DIRNAME = ".agent-presets"
-PRESET_NAME = "standard-custom"
+PRESET_NAME = "standard-mmx"
 
 # Plugin source directories inside the repo (each ships `package.json` + `src/`).
 PLUGIN_SOURCES = ("web-search-mmx", "web-fetch-local")
@@ -331,7 +331,7 @@ def main(argv=None) -> int:
     # 2. Agent preset (mandatory: disables shipped web_search/web_fetch so our
     #    name-collision overrides actually take effect).
     log("")
-    log("[2/3] agent preset -> ~/.dsh/.agent-presets/standard-custom/")
+    log("[2/3] agent preset -> ~/.dsh/.agent-presets/standard-mmx/")
     install_dir(source_root / "presets" / PRESET_NAME, preset_dest, args.dry_run)
 
     # 3. cordis.patch.yml: write the validated merged list.
@@ -342,7 +342,7 @@ def main(argv=None) -> int:
     log("")
     log("Done.")
     log("In the browser: F5, then Settings -> Agent preset -> custom -> pick")
-    log("'Standard (custom)'. cordis.patch.yml is hot-reloaded automatically.")
+    log("'Standard (mmx)'. cordis.patch.yml is hot-reloaded automatically.")
     return 0
 
 

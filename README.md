@@ -19,7 +19,7 @@ Requirements: Python ≥ 3.10 + PyYAML (`pip install pyyaml`).
 
 After the install, the plugin repo is no longer needed at runtime.
 
-In the browser, F5 then Settings -> Agent preset -> custom -> pick "Standard (custom)".
+In the browser, F5 then Settings -> Agent preset -> custom -> pick "Standard (mmx)".
 
 ## How `web_fetch` delivers long content
 
@@ -77,7 +77,7 @@ The same URL always maps to the same file, so repeated fetches overwrite in plac
 ```bash
 cat ~/.dsh/profiles/web/cordis.patch.yml
 ls ~/.dsh/plugins/web-fetch-local ~/.dsh/plugins/web-search-mmx
-ls ~/.dsh/.agent-presets/standard-custom
+ls ~/.dsh/.agent-presets/standard-mmx
 dsh web --dump-config | grep -E "web-search-mmx|web-fetch-local|tool-web"
 ```
 
@@ -89,7 +89,7 @@ This clone (the install source):
 my_dsh_plugins/
 - README.md
 - install.py
-- presets/standard-custom/{agent.cordis.yml, preset.yml}
+- presets/standard-mmx/{agent.cordis.yml, preset.yml}
 - web-search-mmx/{package.json, src/index.mjs}
 - web-fetch-local/{package.json, src/{index.mjs, fetch.py}}
 ```
@@ -102,7 +102,7 @@ After install (DSH-managed):
 - web-fetch-local/...
 
 ~/.dsh/profiles/web/cordis.patch.yml
-~/.dsh/.agent-presets/standard-custom/
+~/.dsh/.agent-presets/standard-mmx/
 ~/.dsh/cache/web-fetch/                <- created on first web_fetch call
 ```
 

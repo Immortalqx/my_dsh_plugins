@@ -1,6 +1,7 @@
-# The `standard-custom` agent preset: a copy of shipped `standard` with the
-# trailing `tool-web` row disabled, so the agent-scope tool registration does
-# not shadow the host-scoped replacements registered in
+# The `standard-mmx` agent preset: a copy of shipped `standard` for the MiniMax
+# M3 model, with the trailing `tool-web` row disabled so the agent-scope tool
+# registration does not shadow the host-scoped `web_search` (mmx-cli) and
+# `web_fetch` (Python urllib) replacements registered in
 # `~/.dsh/profiles/web/cordis.patch.yml`.
 
 - id: persona
