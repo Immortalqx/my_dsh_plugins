@@ -73,12 +73,39 @@ literal IPv4/IPv6 in those ranges
 
 To add a custom blocklist rule, edit `PRIVATE_HOSTS` or `PRIVATE_SUFFIXES` in `web-fetch-local/src/fetch.py`. DSH HMR picks up the change on next `web_fetch` call.
 
+### Recommended: per-user venv (PEP 668 / Homebrew)
+
+`web-fetch-local` soft-imports `extruct` and `brotli`. Installing them into the **system** Python is fine on most distros, but on **Homebrew-managed** Python 3.12+ and any other PEP 668 distro, `pip install` is rejected with `error: externally-managed-environment`. The clean fix is a per-user venv under `~/.dsh/venv/` — the plugin auto-discovers it on every call, so no `DSH_WEB_FETCH_PYTHON` or other env var needs to be set.
+
+```bash
+# POSIX (macOS, Linux, WSL):
+python3 -m venv ~/.dsh/venv
+~/.dsh/venv/bin/python -m pip install --upgrade pip
+~/.dsh/venv/bin/python -m pip install extruct brotli
+
+# Windows (PowerShell or cmd):
+python -m venv %USERPROFILE%\.dsh\venv
+%USERPROFILE%\.dsh\venv\Scripts\python.exe -m pip install --upgrade pip
+%USERPROFILE%\.dsh\venv\Scripts\python.exe -m pip install extruct brotli
+```
+
+If `$DSH_HOME` is set to a non-default location, create the venv there instead — the plugin probes `$DSH_HOME/venv/` first, then falls back to `~/.dsh/venv/`. Resolution order at runtime:
+
+1. `DSH_WEB_FETCH_PYTHON` env var (manual override; takes precedence over everything)
+2. `$DSH_HOME/venv/{bin/python,Scripts/python.exe}` — when `$DSH_HOME` is set
+3. `~/.dsh/venv/{bin/python,Scripts/python.exe}` — derived from `os.homedir()`, the default
+4. System `python3` (POSIX) / `python` (Windows) — last-resort fallback
+
+The venv path is probed at plugin load time, so re-running `install.py` after creating it (or just restarting DSH) picks up the new interpreter on the next `web_fetch` call. Without a venv, the plugin still works — it just falls back to the system `python3`, and any missing `extruct`/`brotli` degrades the result as described below.
+
 ### Optional Python deps
 
-| Dep | What it adds | Install |
+| Dep | What it adds | Install (into the venv above) |
 |---|---|---|
-| `extruct` | JSON-LD, Microdata, OpenGraph, RDFa, Microformat extraction | `pip install extruct` |
-| `brotli` | `Content-Encoding: br` decoding (rare) | `pip install brotli` |
+| `extruct` | JSON-LD, Microdata, OpenGraph, RDFa, Microformat extraction | `~/.dsh/venv/bin/python -m pip install extruct` |
+| `brotli` | `Content-Encoding: br` decoding (rare) | `~/.dsh/venv/bin/python -m pip install brotli` |
+
+On non-PEP 668 systems (Debian/Ubuntu system Python, Windows Python Launcher without store install, etc.), `pip install extruct brotli` straight into the system Python is also fine — the plugin will then use whichever interpreter the system `python3` resolves to.
 
 Both are soft-imported at runtime. Without `extruct`, `metadata` in the result is `null` and `metadataKind` is `"none"` — the tool still works for plain Markdown extraction. Without `brotli`, a br-encoded response is rejected with a friendly error.
 

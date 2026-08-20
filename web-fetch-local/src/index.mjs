@@ -40,6 +40,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 const exec = promisify(execFile)
@@ -50,9 +52,27 @@ const HARD_MAX_BYTES = 2_000_000
 const HARD_MIN_BYTES = 5_000
 const DEFAULT_TIMEOUT_MS = 25_000  // subprocess timeout; fetch.py default is 15s
 
-// Pick the Python interpreter. Override with DSH_WEB_FETCH_PYTHON if your
-// install uses a non-default name (e.g., `py` on Windows, `python3.12`, or a venv path).
+// Pick the Python interpreter. Resolution order:
+//   1. `DSH_WEB_FETCH_PYTHON` env var (power-user override; e.g. `py` on
+//      Windows, `python3.12`, or an absolute venv path).
+//   2. A per-user venv at `$DSH_HOME/venv/{bin/python,Scripts/python.exe}`
+//      when present. Used to keep the plugin isolated from Homebrew's
+//      PEP 668 marker without requiring shell env config; create with
+//      `python3 -m venv ~/.dsh/venv` + `pip install extruct brotli`.
+//   3. A per-user venv at `~/.dsh/venv/...` when `$DSH_HOME` is unset or
+//      points elsewhere. Probed in addition to (2) so the patch keeps
+//      working when the user has a custom `DSH_HOME`.
+//   4. System `python` (Windows) / `python3` (POSIX) as a last resort.
+// Cross-platform: `Scripts\python.exe` on win32, `bin/python` on macOS/Linux.
+const _venvPyParts = process.platform === 'win32'
+  ? ['venv', 'Scripts', 'python.exe']
+  : ['venv', 'bin', 'python']
+const _venvPyCandidates = [process.env.DSH_HOME, join(homedir(), '.dsh')]
+  .filter(Boolean)
+  .map((h) => join(h, ..._venvPyParts))
+const _venvPy = _venvPyCandidates.find((p) => existsSync(p))
 const PYTHON_BIN = process.env.DSH_WEB_FETCH_PYTHON
+  || _venvPy
   || (process.platform === 'win32' ? 'python' : 'python3')
 
 // Chars of the markdown body shipped inline. Full markdown lives in cache.
