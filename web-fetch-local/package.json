@@ -1,12 +1,25 @@
 {
   "name": "dsh-web-fetch-local",
-  "version": "1.0.0",
-  "description": "`web_fetch` tool backed by local Python urllib + SSRF blocklist (any public host is allowed).",
+  "version": "2.0.0",
+  "description": "`web_fetch` tool backed by local Python urllib (HTTP + SSRF + JSON-LD) and Node-side Turndown + GFM (HTML→Markdown). Reuses DSH's bundled turndown via install.py junction bridge.",
   "type": "module",
   "main": "src/index.mjs",
   "scripts": {
     "test": "python src/fetch.py --url https://github.com 2>&1 | python -c \"import sys,json; r=json.loads(sys.stdin.read().splitlines()[0]); assert r['ok']==True, r; print('SSRF-blocked test OK')\""
   },
+  "peerDependencies": {
+    "turndown": "^7.0.0",
+    "@joplin/turndown-plugin-gfm": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "turndown": {
+      "comment": "Provided by DSH itself (`@deepseek-ai/dsh` declares it as a dep). install.py creates a directory junction `~/.dsh/plugins/web-fetch-local/node_modules` -> DSH's node_modules so Node module resolution finds them. If the junction is missing, the tool degrades to text-only mode."
+    },
+    "@joplin/turndown-plugin-gfm": {
+      "comment": "Provided by DSH itself. Same junction mechanism as `turndown`."
+    }
+  },
+  "optionalDependencies_comment": "Python `extruct` (pip install) is optional. When present, the tool extracts JSON-LD / Microdata / OpenGraph / RDFa / Microformat from the page and surfaces them as `metadata` in the result. When absent, `metadata` is null and the tool degrades gracefully.",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"

@@ -8,6 +8,23 @@
 // Args                      : `{ query: string }`
 // Output                    : `{ sources: [{url, title?, snippet?, publishedAt?}], truncated }`
 //
+// Schema pipeline note:
+//   The tool definition is wrapped in `defineTool()` from
+//   `@deepseek-ai/dsh-tools` (see web-fetch-local/docs/RESEARCH-NOTES.md,
+//   "DSH 模型可见 schema 的端到端管线"). Without this wrapper the model-facing
+//   `parameters` schema collapses to `{properties:{}, required:[]}` because
+//   `ctx.tools.register()` does NOT compile raw parameter maps — only the
+//   `output.schema`. `defineTool()` runs `parameterSchemaSpecToJsonSchema()`
+//   which lifts per-property `required: true` into a top-level `required[]`
+//   and wraps the spec in `{type:"object", properties, required}`. The
+//   `output.schema` here uses `additionalProperties: false` and avoids
+//   top-level `required: [...]` because the dsh-tools compiler rejects them.
+//
+//   `@deepseek-ai/dsh-tools` is resolved via the node_modules junction
+//   that `install.py` creates at `~/.dsh/plugins/web-search-mmx/node_modules`
+//   pointing into DSH's bundled `<DSH root>/node_modules/@deepseek-ai/dsh/
+//   node_modules/`.
+//
 // Cross-platform mmx invocation:
 //   - Windows: `cmd.exe /c mmx <args>`  — Node 18+ does not consult PATHEXT
 //     and CVE-2024-27980 blocks direct spawn of .cmd/.bat. args are passed
@@ -18,6 +35,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 
 const exec = promisify(execFile)
 
@@ -76,7 +94,7 @@ async function runMmxSearch(query, opts, signal) {
 }
 
 export function apply(ctx) {
-  ctx.tools.register({
+  ctx.tools.register(defineTool({
     name: 'web_search',
 
     description:
@@ -95,23 +113,23 @@ export function apply(ctx) {
     output: {
       schema: {
         type: 'object',
+        additionalProperties: false,
         properties: {
           sources: {
             type: 'array',
             items: {
               type: 'object',
+              additionalProperties: false,
               properties: {
                 url: { type: 'string' },
                 title: { type: 'string' },
                 snippet: { type: 'string' },
                 publishedAt: { type: 'string' },
               },
-              required: ['url'],
             },
           },
           truncated: { type: 'boolean' },
         },
-        required: ['sources', 'truncated'],
       },
       render(_args, value) {
         const lines = []
@@ -151,5 +169,5 @@ export function apply(ctx) {
         throw new Error(`web_search: ${err && err.message ? err.message : String(err)}${stderr}`)
       }
     },
-  })
+  }))
 }

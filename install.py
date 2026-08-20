@@ -5,6 +5,20 @@ Copies the plugin source dirs and the agent preset into the DSH home
 (`~/.dsh/`). The preset ships with two ``__PLUGIN_PATH_*__`` placeholders
 that install.py substitutes with absolute paths at install time.
 
+For each plugin, install.py also:
+
+  - Creates a directory junction at `~/.dsh/plugins/<name>/node_modules`
+    pointing into DSH's bundled `node_modules/`. Node module resolution walks
+    up from `src/index.mjs` looking for a `node_modules/` directory; without
+    the junction it cannot see DSH's `@deepseek-ai/dsh-tools` (used by every
+    plugin that calls `defineTool()`) or, for `web-fetch-local`, DSH's
+    `turndown` and `@joplin/turndown-plugin-gfm`. The junction uses
+    `mklink /J` on Windows (no admin required) and `os.symlink` on POSIX.
+  - Recommends `pip install extruct` for `web-fetch-local` (structured-data
+    extraction: JSON-LD, OpenGraph, Microdata, RDFa, Microformat). Without
+    extruct, `metadata` in the tool result is `null` and `metadataKind` is
+    `"none"`.
+
 Designed to be:
 
   - Idempotent: re-running produces the same state.
@@ -24,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -46,6 +61,27 @@ PLUGIN_PATH_PLACEHOLDERS = {
     "__PLUGIN_PATH_WEB_FETCH_LOCAL__": "web-fetch-local",
 }
 
+# Plugin-specific optional dependencies (Python). Soft-imported at runtime;
+# install.py recommends them but does NOT fail if `pip install` cannot run.
+PLUGIN_PYTHON_DEPS = {
+    "web-fetch-local": ["extruct"],
+}
+
+# Plugin-specific Node modules to bridge from DSH's bundled node_modules into
+# the plugin's own node_modules/ via a junction. Keys are plugin names; values
+# are lists of npm package directory names (must exist under
+# `<DSH root>/node_modules/@deepseek-ai/dsh/node_modules/<name>`).
+#
+# `@deepseek-ai/dsh-tools` is the model-facing tool compiler; both register
+# `web_search`/`web_fetch` through `defineTool()` so they need it resolvable
+# from the plugin's `src/*.mjs` at module-load time. Without this bridge, the
+# `import { defineTool } from '@deepseek-ai/dsh-tools'` line throws
+# `ERR_MODULE_NOT_FOUND` and the plugin fails to load.
+PLUGIN_NODE_BRIDGE = {
+    "web-search-mmx": ["@deepseek-ai/dsh-tools"],
+    "web-fetch-local": ["@deepseek-ai/dsh-tools", "turndown", "@joplin/turndown-plugin-gfm"],
+}
+
 MIN_PYTHON = (3, 10)
 
 
@@ -62,7 +98,7 @@ def fatal(msg: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
 
 
 def is_windows() -> bool:
-    return sys.platform == "win32"
+    return sys.platform == 'win32'
 
 
 def format_plugin_name(abs_path: Path) -> str:
@@ -85,7 +121,37 @@ def resolve_paths(source_root: Path, target_home: Path):
     """Compute every absolute path the installer needs."""
     plugins_dir = target_home / DSH_HOME_SUBDIR / PLUGINS_DIRNAME
     preset_dest = target_home / DSH_HOME_SUBDIR / PRESETS_DIRNAME / PRESET_NAME
-    return plugins_dir, preset_dest
+    # DSH's bundled node_modules (where its npm package deps live, including
+    # turndown). `<DSH root>` is the parent of the .dsh/ home directory.
+    dsh_root_node_modules = _find_dsh_root_node_modules(target_home)
+    return plugins_dir, preset_dest, dsh_root_node_modules
+
+
+def _find_dsh_root_node_modules(target_home: Path) -> Path | None:
+    """Locate the directory containing `node_modules/@deepseek-ai/dsh/...`.
+
+    On a typical npm install, this is `target_home/../AppData/Roaming/npm/`
+    on Windows (where `npm install -g @deepseek-ai/dsh` lands) or
+    `/usr/local/lib/node_modules/` on POSIX. We probe a few known locations
+    and return the first one that has a `@deepseek-ai/dsh/node_modules/`
+    subdirectory.
+
+    Returns None when nothing matches — install.py then skips the junction
+    step and the plugin degrades gracefully to text-only output.
+    """
+    candidates = []
+    if is_windows():
+        candidates.append(Path.home() / "AppData" / "Roaming" / "npm" / "node_modules")
+        candidates.append(Path(r"C:\Program Files\nodejs\node_modules"))
+    else:
+        candidates.append(Path("/usr/local/lib/node_modules"))
+        candidates.append(Path.home() / ".npm-global" / "lib" / "node_modules")
+        candidates.append(Path("/opt/homebrew/lib/node_modules"))
+    for cand in candidates:
+        dsh_pkg = cand / "@deepseek-ai" / "dsh"
+        if dsh_pkg.is_dir() and (dsh_pkg / "node_modules").is_dir():
+            return dsh_pkg / "node_modules"
+    return None
 
 
 # ---- plugin dirs: force-overwrite copy ------------------------------------
@@ -106,6 +172,77 @@ def install_dir(source: Path, dest: Path, dry_run: bool) -> None:
     log(f"  cp -r {source} -> {dest}")
     if not dry_run:
         shutil.copytree(source, dest)
+
+
+# ---- plugin-specific: node_modules junction + python deps ---------------
+
+def bridge_plugin_node_modules(plugin_dest: Path, dsh_node_modules: Path,
+                                packages: list[str], dry_run: bool) -> None:
+    """Create `plugin_dest/node_modules/` as a junction into DSH's
+    node_modules/, so Node module resolution from `plugin_dest/src/*.mjs`
+    can find packages shipped under `dsh_node_modules/<name>`.
+
+    Behavior on missing packages: skip silently (the corresponding import
+    fails later, and the tool degrades to text-only mode). We don't fail
+    the install — bridge creation is best-effort.
+    """
+    if dsh_node_modules is None or not dsh_node_modules.is_dir():
+        log(f"  note  DSH's node_modules not found; skipping junction for {plugin_dest.name}")
+        return
+
+    target_node_modules = plugin_dest / "node_modules"
+    if target_node_modules.exists() or target_node_modules.is_symlink():
+        log(f"  rm    {target_node_modules}")
+        if not dry_run:
+            # Junction on Windows, symlink elsewhere. Both are removed with
+            # shutil.rmtree which follows junctions/symlinks; for symlinks
+            # pointing to a directory use `unlink` instead.
+            if target_node_modules.is_symlink() and not target_node_modules.is_dir():
+                target_node_modules.unlink()
+            else:
+                shutil.rmtree(target_node_modules, ignore_errors=True)
+
+    log(f"  ln -s {dsh_node_modules} -> {target_node_modules}  (junction)")
+    if dry_run:
+        return
+    if is_windows():
+        # `mklink /J` creates a directory junction (no admin required on
+        # modern Windows). Python's os.symlink needs admin for directory
+        # symlinks on Windows; junctions sidestep that.
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(target_node_modules), str(dsh_node_modules)],
+                check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            log(f"  note  mklink /J failed: {e.stderr.strip() or e}")
+            log(f"        the plugin will degrade to text-only output")
+    else:
+        try:
+            target_node_modules.symlink_to(dsh_node_modules, target_is_directory=True)
+        except OSError as e:
+            log(f"  note  symlink failed: {e}")
+            log(f"        the plugin will degrade to text-only output")
+
+    # Verify each requested package is reachable through the junction.
+    for pkg in packages:
+        target_pkg = target_node_modules / pkg
+        if target_pkg.is_dir():
+            log(f"  [+]   {pkg} reachable via junction")
+        else:
+            log(f"  note  {pkg} not found under DSH's node_modules; skipping")
+
+
+def recommend_python_deps(plugin_name: str, deps: list[str], dry_run: bool) -> None:
+    """Print a `pip install` recommendation for the plugin's optional
+    dependencies. install.py does NOT install them automatically — they're
+    soft-imported at runtime, and the user can choose to add them later.
+    """
+    if not deps:
+        return
+    cmd = f"  pip install {' '.join(deps)}"
+    log(f"  note  {plugin_name} recommends Python deps: {', '.join(deps)}")
+    log(cmd)
 
 
 # ---- preset: copy with placeholder substitution ---------------------------
@@ -206,7 +343,7 @@ def main(argv=None) -> int:
     if not source_root.is_dir():
         fatal(f"--source is not a directory: {source_root}")
 
-    plugins_dir, preset_dest = resolve_paths(source_root, target_home)
+    plugins_dir, preset_dest, dsh_node_modules = resolve_paths(source_root, target_home)
 
     log(f"DSH home:    {target_home}")
     log(f"Source root: {source_root}")
@@ -217,7 +354,16 @@ def main(argv=None) -> int:
     # 1. Plugin source dirs.
     log("[1/2] plugin sources -> ~/.dsh/plugins/")
     for src_name in PLUGIN_SOURCES:
-        install_dir(source_root / src_name, plugins_dir / src_name, args.dry_run)
+        plugin_dest = plugins_dir / src_name
+        install_dir(source_root / src_name, plugin_dest, args.dry_run)
+        # Per-plugin extras: Node module bridge + Python deps recommendation.
+        if src_name in PLUGIN_NODE_BRIDGE:
+            bridge_plugin_node_modules(
+                plugin_dest, dsh_node_modules,
+                PLUGIN_NODE_BRIDGE[src_name], args.dry_run,
+            )
+        if src_name in PLUGIN_PYTHON_DEPS:
+            recommend_python_deps(src_name, PLUGIN_PYTHON_DEPS[src_name], args.dry_run)
 
     # 2. Agent preset.
     log("")
@@ -228,6 +374,8 @@ def main(argv=None) -> int:
     log("Done.")
     log("In the browser: F5, then Settings -> Agent preset -> custom -> pick")
     log("'Standard (mmx)'.")
+    log("")
+    log("Optional: pip install extruct  (for JSON-LD / OpenGraph extraction).")
     return 0
 
 
