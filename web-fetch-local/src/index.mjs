@@ -3,8 +3,12 @@
 // Tool name (model-facing) : `web_fetch` (drop-in)
 // Plugin row id            : `web-fetch-local`
 // Args                     : `{ url, max_bytes? }`
-// Output                   : `{ url, statusCode, bytes, totalBytes, truncated,
-//                               textChars, previewChars, fullPath, preview }`
+// Output                   : `{ title, url, statusCode, bytes, totalBytes, truncated,
+//                               textChars, previewChars, bodyLines, resourcesLines,
+//                               resourcesStartLine, totalLines, linksCount,
+//                               imagesCount, fullPath, preview, error }`
+//   - `title` is the page <title> when available, else ""
+//   - `error` is non-empty only on ok=false responses
 //
 // The tool returns a short preview inline (first ~2000 chars of the
 // extracted text). The full extracted text is always written to a cache
@@ -12,21 +16,18 @@
 // built-in `str_replace_editor` `view` command when it needs the whole
 // page (long articles, references, etc.).
 //
-// Why Python (not Node fetch):
-//   1. Defence-in-depth — separate process boundary makes sandbox leakage
-//      easier to reason about; the Node side never opens a raw socket itself.
-//   2. User preference (Python SDK is on the table for future work).
+// Why Python (not Node fetch): separate process boundary makes sandbox
+// leakage easier to reason about — the Node side never opens a raw socket
+// itself.
 //
 // Cross-platform python invocation:
-//   - Windows: `python` (the convention from dsh-tool-web; .py is
-//     associated with the Microsoft Store or python.org installer).
+//   - Windows: `python` (.py is associated with the Microsoft Store or
+//     python.org installer).
 //   - macOS/Linux: `python3` (modern macOS has no `python` symlink).
 // Override with `DSH_WEB_FETCH_PYTHON=...` if your installation differs.
 //
 // Host policy: any public host is allowed; only loopback / private suffixes
-// are blocked (SSRF defence). The `web_search` we replace (mmx-cli, MiniMax
-// OAuth) already filters search results, so over-blocking on fetch would
-// just lock the agent out of legitimate pages.
+// are blocked (SSRF defence).
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -54,16 +55,10 @@ export function apply(ctx) {
     name: 'web_fetch',
 
     description:
-      'Fetch the text content of an HTTP(S) URL. The response carries a short ' +
-      'preview inline (first ~2000 chars) plus the absolute path to a cache file ' +
-      'that holds the complete extracted text. ' +
-      'To read the FULL content: call `str_replace_editor` with `command="view"`, ' +
-      '`path=<fullPath>`, and `view_range=[1, -1]`. The `view_range=[1, -1]` is ' +
-      'REQUIRED for pages longer than ~16K characters because the read tool ' +
-      'otherwise truncates its output and you would mistakenly think this fetch ' +
-      'returned an incomplete page. For a specific window use `view_range=[<start>, <end>]`. ' +
-      'Use AFTER web_search to read full articles — do not fetch every search result, ' +
-      'only the 1-3 you will cite.',
+      'Fetch the text content of an HTTP(S) URL. Returns a short inline preview ' +
+      '(first ~2000 chars) and the path to a cache file with the full extracted ' +
+      'text. **The inline preview is truncated** — read the cache file with ' +
+      '`str_replace_editor` to see the complete page.',
 
     parameters: {
       url: {
@@ -83,6 +78,7 @@ export function apply(ctx) {
       schema: {
         type: 'object',
         properties: {
+          title: { type: 'string' },
           url: { type: 'string' },
           statusCode: { type: 'number' },
           bytes: { type: 'number' },
@@ -90,6 +86,12 @@ export function apply(ctx) {
           truncated: { type: 'boolean' },
           textChars: { type: 'number' },
           previewChars: { type: 'number' },
+          bodyLines: { type: 'number' },
+          resourcesLines: { type: 'number' },
+          resourcesStartLine: { type: ['number', 'null'] },
+          totalLines: { type: 'number' },
+          linksCount: { type: 'number' },
+          imagesCount: { type: 'number' },
           fullPath: { type: 'string' },
           preview: { type: 'string' },
           error: { type: 'string' },
@@ -100,12 +102,25 @@ export function apply(ctx) {
         if (!value.statusCode || value.statusCode >= 400) {
           return [{ type: 'text', text: `${value.url} (HTTP ${value.statusCode || 'ERR'})\nError: ${value.error || ''}` }]
         }
-        const head = `${value.url} (HTTP ${value.statusCode}, ${value.bytes} bytes, ${value.textChars} chars text${value.truncated ? ', truncated' : ', complete'})`
+        const titleLine = value.title ? `Title: ${value.title}\n` : ''
+        const head = `${value.url} (HTTP ${value.statusCode}, ${value.bytes} bytes${value.truncated ? ', truncated' : ', complete'})`
+        const hasResources = value.resourcesStartLine !== null && value.resourcesStartLine !== undefined
+        const layoutLines = []
+        layoutLines.push(`Body: ${value.textChars} chars, lines 1-${value.bodyLines}`)
+        if (hasResources) {
+          layoutLines.push(`Resources: ${value.linksCount} links + ${value.imagesCount} images, lines ${value.resourcesStartLine}-${value.totalLines}`)
+        }
         const cacheHint = value.fullPath
-          ? `\n\nFull content (${value.textChars} chars) saved to: ${value.fullPath}\n` +
-            `Read the whole file: str_replace_editor(command="view", path="${value.fullPath}", view_range=[1, -1])`
+          ? `\n\n${layoutLines.join('\n')}\n\n` +
+            (value.bodyLines > 0
+              ? `Read body:      str_replace_editor(command="view", path="${value.fullPath}", view_range=[1, ${value.bodyLines}])\n`
+              : '') +
+            (hasResources
+              ? `Read resources: str_replace_editor(command="view", path="${value.fullPath}", view_range=[${value.resourcesStartLine}, -1])\n`
+              : '') +
+            `Read whole:     str_replace_editor(command="view", path="${value.fullPath}", view_range=[1, -1])`
           : ''
-        return [{ type: 'text', text: `${head}\n\n${value.preview}${cacheHint}` }]
+        return [{ type: 'text', text: `${titleLine}${head}\n\n${value.preview}${cacheHint}` }]
       },
     },
 
@@ -143,6 +158,7 @@ export function apply(ctx) {
           throw new Error(parsed.error || `web_fetch: ${url} failed`)
         }
         return {
+          title: parsed.title || '',
           url: parsed.url || url,
           statusCode: parsed.status ?? 0,
           bytes: parsed.bytes ?? 0,
@@ -150,6 +166,12 @@ export function apply(ctx) {
           truncated: !!parsed.truncated,
           textChars: parsed.text_chars ?? (parsed.preview ? parsed.preview.length : 0),
           previewChars: parsed.preview_chars ?? (parsed.preview ? parsed.preview.length : 0),
+          bodyLines: parsed.body_lines ?? 0,
+          resourcesLines: parsed.resources_lines ?? 0,
+          resourcesStartLine: parsed.resources_start_line ?? null,
+          totalLines: parsed.total_lines ?? 0,
+          linksCount: parsed.links_count ?? 0,
+          imagesCount: parsed.images_count ?? 0,
           fullPath: parsed.full_path || '',
           preview: parsed.preview || '',
         }

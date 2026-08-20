@@ -1,2 +1,2 @@
 name: Standard (mmx)
-description: Copy of shipped standard for the MiniMax M3 model — `web_search` and `web_fetch` are rewritten as host-scoped plugins registered in `~/.dsh/profiles/web/cordis.patch.yml` (mmx-cli for `web_search`, Python urllib for `web_fetch`) instead of the shipped DeepSeek-billed `dsh-tool-web`.
+description: `web_search` via mmx-cli, `web_fetch` via a local Python subprocess.

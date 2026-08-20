@@ -80,17 +80,15 @@ export function apply(ctx) {
     name: 'web_search',
 
     description:
-      'Search the web via MiniMax OAuth (mmx-cli). Returns up to 8 sources ' +
-      'with url/title/snippet/publishedAt. After a search, call web_fetch on the ' +
-      '1-3 most relevant URLs to read full content before answering. Cite each ' +
-      'URL you actually use as a markdown link. The `query` argument is required ' +
-      'and must be a non-empty string.',
+      'Search the web via MiniMax OAuth (mmx-cli). Returns up to 8 sources with ' +
+      'url, title, snippet, and publishedAt. **The snippet is a brief excerpt, ' +
+      'not full content** — `web_fetch` reads the complete page from a URL.',
 
     parameters: {
       query: {
         type: 'string',
         required: true,
-        description: 'Search query (1-500 chars). Be specific.',
+        description: 'Search query (1-500 chars).',
       },
     },
 

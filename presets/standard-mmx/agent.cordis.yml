@@ -1,8 +1,6 @@
-# The `standard-mmx` agent preset: a copy of shipped `standard` for the MiniMax
-# M3 model, with the trailing `tool-web` row disabled so the agent-scope tool
-# registration does not shadow the host-scoped `web_search` (mmx-cli) and
-# `web_fetch` (Python urllib) replacements registered in
-# `~/.dsh/profiles/web/cordis.patch.yml`.
+# `standard-mmx`: same as shipped `standard`. The bottom rows register
+# local plugins for `web_search` / `web_fetch` and disable the shipped web
+# tools they replace.
 
 - id: persona
   name: '@deepseek-ai/dsh-persona'
@@ -142,8 +140,24 @@
   config:
     allowParallelInProgress: true
 
-# Overridden from shipped `standard`: tool-web is DISABLED here so the
-# agent scope does not shadow the host-scoped `web_search` / `web_fetch`.
+# Local web_search / web_fetch plugin registrations. `__PLUGIN_PATH_*__`
+# placeholders are substituted by install.py at install time.
+
+- id: web-search-mmx
+  name: __PLUGIN_PATH_WEB_SEARCH_MMX__
+  inject: ['tools']
+
+- id: web-fetch-local
+  name: __PLUGIN_PATH_WEB_FETCH_LOCAL__
+  inject: ['tools']
+
+# Shipped web_search / web_fetch, disabled to avoid name collisions with
+# the local plugin registrations above.
+
+- id: web-search-deepseek
+  name: '@deepseek-ai/dsh-web-search-deepseek'
+  disabled: true
+
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   disabled: true
