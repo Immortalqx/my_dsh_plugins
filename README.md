@@ -1,6 +1,6 @@
 # my_dsh_plugins
 
-`web_search` (mmx-cli) + `web_fetch` (Python urllib + Node Turndown) plugins for DSH, scoped to the `standard-mmx` agent preset only.
+Local `web_search` (via `mmx` CLI, MiniMax OAuth) and `web_fetch` (Python urllib + Node Turndown) plugins for DSH, scoped to the `standard-mmx` agent preset only.
 
 ## Install
 
@@ -8,13 +8,13 @@
 python install.py
 ```
 
-`install.py` writes three locations under `~/.dsh/` and nowhere else:
+Writes three locations under `~/.dsh/`:
 
 - `~/.dsh/plugins/web-search-mmx/`
 - `~/.dsh/plugins/web-fetch-local/`
 - `~/.dsh/.agent-presets/standard-mmx/`
 
-It does **not** touch `~/.dsh/profiles/web/`, `~/.dsh/settings.yaml`, or any other host-scope config. The official DSH modes (`@deepseek-ai/dsh-web-search-deepseek`, `@deepseek-ai/dsh-tool-web`) remain active for everyone; the `standard-mmx` preset overrides them locally for its own sessions only.
+Does **not** touch `~/.dsh/profiles/web/`, `~/.dsh/settings.yaml`, or any host-scope config. Requires Python ≥ 3.10. After install, the repo is no longer needed at runtime.
 
 Flags:
 
@@ -22,15 +22,28 @@ Flags:
 - `--source <dir>` — repo root (default: this script's parent directory)
 - `--target-home <dir>` — override `$HOME` (for testing)
 
-Requirements: Python ≥ 3.10 (no other deps required to install — see below for optional ones).
+### Recommended: per-user venv for `web_fetch`
 
-After the install, the plugin repo is no longer needed at runtime.
+`web_fetch` soft-imports `extruct` and `brotli`. The recommended home for them is a dedicated venv at `~/.dsh/venv/` — the plugin auto-discovers it on load, no env var needed.
 
-In the browser, F5 then Settings → Agent preset → custom → pick "Standard (mmx)".
+```bash
+python3 -m venv ~/.dsh/venv
+~/.dsh/venv/bin/python -m pip install extruct brotli
+```
 
-## `web_search` (web-search-mmx)
+When `$DSH_HOME` is set, create the venv there instead. On PEP 668 distros (Homebrew Python 3.12+, Debian Bookworm+) this also avoids `pip install` being rejected for the system interpreter. Without a venv the plugin falls back to system `python3`; `extruct` / `brotli` degrade gracefully (null metadata / br-decode error).
 
-Backed by the local `mmx` CLI (MiniMax OAuth). Returns up to 8 sources per call:
+## Use
+
+1. Refresh the browser (F5) to reload plugins.
+2. Settings → Agent preset → custom → pick **"Standard (mmx)"**.
+3. Call `web_search` and `web_fetch` from chat like any other DSH tool — they appear as native tools to the model.
+
+## What you get
+
+### `web_search`
+
+Up to 8 sources per call, sourced via the `mmx` CLI:
 
 ```ts
 {
@@ -39,88 +52,11 @@ Backed by the local `mmx` CLI (MiniMax OAuth). Returns up to 8 sources per call:
 }
 ```
 
-Override the mmx binary path with `DSH_WEB_SEARCH_MMX_BIN=<path>`.
+The model-facing output includes guidance: "the snippet is a brief excerpt, not full content" and "`web_fetch` reads the complete page from a URL". URLs must be cited as Markdown links in any answer.
 
-## `web_fetch` (web-fetch-local) — v2
+### `web_fetch`
 
-v2 is a two-stage pipeline. Python does HTTP + SSRF + raw HTML preservation + JSON-LD extraction; Node does HTML → Markdown via Turndown (reusing DSH's bundled `turndown` + `@joplin/turndown-plugin-gfm`).
-
-```
-[Node] index.mjs ─→ spawn Python ─→ [Python] fetch.py
-  ↑                                       ↓
-  └─ Turndown.turndown(rawHtml)           urllib + SSRF gate
-     ↓                                   gzip / deflate / br decode
-  rewrite cache file                     extruct → JSON-LD / OG / Microdata / RDFa
-  ↓
-  Markdown body + Resources + Metadata
-```
-
-### What you get
-
-- **Markdown body** (Turndown + GFM): tables, code blocks, links, image refs preserved
-- **Resources section**: every `<a href>` and `<img src>` collected with absolute URLs
-- **Structured Data section**: JSON-LD, Microdata, OpenGraph, RDFa, Microformat extracted by `extruct` (when installed) and rendered as a fenced JSON code block
-
-### SSRF defense (unchanged from v1)
-
-Any public host is allowed; only loopback / private suffixes are blocked:
-
-```
-localhost / 127.0.0.1 / ::1 / 0.0.0.0 / 0    (loopback)
-*.local / *.internal / *.lan                  (private suffixes)
-literal IPv4/IPv6 in those ranges
-```
-
-To add a custom blocklist rule, edit `PRIVATE_HOSTS` or `PRIVATE_SUFFIXES` in `web-fetch-local/src/fetch.py`. DSH HMR picks up the change on next `web_fetch` call.
-
-### Recommended: per-user venv (PEP 668 / Homebrew)
-
-`web-fetch-local` soft-imports `extruct` and `brotli`. Installing them into the **system** Python is fine on most distros, but on **Homebrew-managed** Python 3.12+ and any other PEP 668 distro, `pip install` is rejected with `error: externally-managed-environment`. The clean fix is a per-user venv under `~/.dsh/venv/` — the plugin auto-discovers it on every call, so no `DSH_WEB_FETCH_PYTHON` or other env var needs to be set.
-
-```bash
-# POSIX (macOS, Linux, WSL):
-python3 -m venv ~/.dsh/venv
-~/.dsh/venv/bin/python -m pip install --upgrade pip
-~/.dsh/venv/bin/python -m pip install extruct brotli
-
-# Windows (PowerShell or cmd):
-python -m venv %USERPROFILE%\.dsh\venv
-%USERPROFILE%\.dsh\venv\Scripts\python.exe -m pip install --upgrade pip
-%USERPROFILE%\.dsh\venv\Scripts\python.exe -m pip install extruct brotli
-```
-
-If `$DSH_HOME` is set to a non-default location, create the venv there instead — the plugin probes `$DSH_HOME/venv/` first, then falls back to `~/.dsh/venv/`. Resolution order at runtime:
-
-1. `DSH_WEB_FETCH_PYTHON` env var (manual override; takes precedence over everything)
-2. `$DSH_HOME/venv/{bin/python,Scripts/python.exe}` — when `$DSH_HOME` is set
-3. `~/.dsh/venv/{bin/python,Scripts/python.exe}` — derived from `os.homedir()`, the default
-4. System `python3` (POSIX) / `python` (Windows) — last-resort fallback
-
-The venv path is probed at plugin load time, so re-running `install.py` after creating it (or just restarting DSH) picks up the new interpreter on the next `web_fetch` call. Without a venv, the plugin still works — it just falls back to the system `python3`, and any missing `extruct`/`brotli` degrades the result as described below.
-
-### Optional Python deps
-
-| Dep | What it adds | Install (into the venv above) |
-|---|---|---|
-| `extruct` | JSON-LD, Microdata, OpenGraph, RDFa, Microformat extraction | `~/.dsh/venv/bin/python -m pip install extruct` |
-| `brotli` | `Content-Encoding: br` decoding (rare) | `~/.dsh/venv/bin/python -m pip install brotli` |
-
-On non-PEP 668 systems (Debian/Ubuntu system Python, Windows Python Launcher without store install, etc.), `pip install extruct brotli` straight into the system Python is also fine — the plugin will then use whichever interpreter the system `python3` resolves to.
-
-Both are soft-imported at runtime. Without `extruct`, `metadata` in the result is `null` and `metadataKind` is `"none"` — the tool still works for plain Markdown extraction. Without `brotli`, a br-encoded response is rejected with a friendly error.
-
-### Node bridge
-
-`index.mjs` needs `turndown` and `@joplin/turndown-plugin-gfm`. DSH already ships them as deps of `@deepseek-ai/dsh`, but Node module resolution walks up from the plugin's `index.mjs` looking for a `node_modules/` directory and cannot see into nested `@deepseek-ai/dsh/node_modules/`. `install.py` solves this by creating a directory junction:
-
-```
-~/.dsh/plugins/web-fetch-local/node_modules/
-    -> <DSH root>/node_modules/@deepseek-ai/dsh/node_modules/
-```
-
-On Windows this uses `mklink /J` (no admin required); on POSIX it uses `os.symlink`. If the junction is missing, `install.py` logs a note and the plugin degrades to plain-text extraction (the cache file gets raw HTML instead of Markdown and the result reports `format: "text-degraded"`).
-
-### Result schema
+Returns a Markdown rendering of the page plus extracted structured data:
 
 ```ts
 {
@@ -131,32 +67,25 @@ On Windows this uses `mklink /J` (no admin required); on POSIX it uses `os.symli
   bytes: number,
   totalBytes: number | null,
   truncated: boolean,
-  contentType: string,            // mime type stripped of params
-
-  // v2 additions:
+  contentType: string,
   format: "markdown" | "text-degraded",
   htmlToMdEngine: "turndown+gfm" | "htmlparser-fallback",
   metadata: object | null,        // { "json-ld": [...], "opengraph": [...], ... }
   metadataKind: "json-ld" | "opengraph" | "mixed" | "none",
   extructAvailable: boolean,
-
   textChars: number,
   previewChars: number,
   bodyLines: number,
-  resourcesLines: number,
-  resourcesStartLine: number | null,
   metadataLines: number,
   metadataStartLine: number | null,
   totalLines: number,
-  linksCount: number,
-  imagesCount: number,
-  fullPath: string,               // path to the rewritten cache file
-  preview: string,                // first ~2000 chars of the rewritten file
+  fullPath: string,               // path to the cache file
+  preview: string,                // first ~2000 chars of the cache file
   error: string,
 }
 ```
 
-The model-facing `output.render` formats the result as:
+The first ~2000 chars of the Markdown body are returned inline. The full content (body + structured data) lives in the cache file at `~/.dsh/cache/web-fetch/web-fetch_<url-hash8>.txt`, and the model-facing output gives line-number ranges for body and metadata. Example rendered output:
 
 ```
 Title: ...
@@ -165,61 +94,49 @@ URL (HTTP 200, NNN bytes, complete) [format=markdown; engine=turndown+gfm] [meta
 [first 2000 chars of markdown]
 
 Body: NNNN chars, lines 1-N
-Resources: N links + N images, lines X-Y
 Metadata: opengraph, lines X-Y
 
-Read body:      str_replace_editor(command="view", path="...", view_range=[1, N])
-Read resources: str_replace_editor(command="view", path="...", view_range=[X, Y])
-Read metadata:  str_replace_editor(command="view", path="...", view_range=[X, Y])
-Read whole:     str_replace_editor(command="view", path="...", view_range=[1, -1])
+Read body:      /Users/.../web-fetch_4d163095.txt lines 1-N
+Read metadata:  /Users/.../web-fetch_4d163095.txt lines X-Y
 ```
 
-### Cache layout
+## How this differs from DSH defaults
 
-Cache files live at `~/.dsh/cache/web-fetch/web-fetch_<url-hash8>.txt`. v2 rewrites them from raw HTML (v1) to:
+| | `standard-mmx` (this plugin) | DSH default |
+|---|---|---|
+| `web_search` | `mmx` CLI (MiniMax OAuth), up to 8 sources | `@deepseek-ai/dsh-web-search-deepseek` |
+| `web_fetch` | Local Python urllib + Node Turndown; structured-data extraction | `@deepseek-ai/dsh-tool-web` |
 
-```
-<markdown body>
+The `standard-mmx` preset registers the local tools and disables the shipped ones (`@deepseek-ai/dsh-web-search-deepseek`, `@deepseek-ai/dsh-tool-web`) **only inside the preset's sessions**. Other presets and default sessions continue to use DSH's official tools. The host-scope config under `~/.dsh/profiles/web/` and `~/.dsh/settings.yaml` is untouched.
 
-## Resources (N links, M images)
-### Links
-- [text](url)
-- ...
-### Images
-- ![alt](url)
-- ...
+`web_fetch`'s output is richer than the shipped tool's plain-text result: structured data (JSON-LD, OpenGraph, Microdata, RDFa, Microformat) is extracted when `extruct` is installed, useful for pages with schema.org metadata.
 
-## Structured Data (X JSON-LD, Y OpenGraph, ...)
-```json
-{ "json-ld": [...], "opengraph": [...], ... }
-```
-```
-
-The same URL always maps to the same file, so repeated fetches overwrite in place.
-
-### Configuration
+## Configuration
 
 | Env var | Default | Effect |
 |---|---|---|
-| `DSH_WEB_FETCH_PYTHON` | `python` on Windows, `python3` elsewhere | Override the Python interpreter |
-| `DSH_HOME` | `~/.dsh` | Override the DSH home (mainly for tests) |
+| `DSH_WEB_FETCH_PYTHON` | `python` on Windows, `python3` elsewhere | Override the Python interpreter (power-user override) |
+| `DSH_WEB_SEARCH_MMX_BIN` | `mmx` on PATH | Override the mmx binary path |
+| `DSH_HOME` | `~/.dsh` | Override the DSH home |
 
 ## Verify
 
 ```bash
 ls ~/.dsh/plugins/web-fetch-local ~/.dsh/plugins/web-search-mmx
 ls ~/.dsh/.agent-presets/standard-mmx
-```
-
-To confirm the Node bridge worked after install:
-
-```bash
 node -e "console.log(require('turndown/package.json').version)"  # run from ~/.dsh/plugins/web-fetch-local
 ```
 
+## Prerequisites
+
+- DSH ≥ 0.1.0-rc.6, Node ≥ 18.0.0
+- `install.py`: Python ≥ 3.10
+- `web-search-mmx`: `mmx` CLI on `PATH`, authenticated via `mmx auth login`
+- `web-fetch-local`: Python ≥ 3.10; optional `extruct` (structured data) and `brotli` (br decoding) — see Install → venv
+
 ## Layout
 
-This clone (the install source):
+This repo (install source):
 
 ```
 my_dsh_plugins/
@@ -227,7 +144,7 @@ my_dsh_plugins/
 - install.py
 - presets/standard-mmx/{agent.cordis.yml, preset.yml}
 - web-search-mmx/{package.json, src/index.mjs}
-- web-fetch-local/{package.json, src/{index.mjs, fetch.py}, docs/RESEARCH-NOTES.md}
+- web-fetch-local/{package.json, src/{index.mjs, fetch.py}}
 ```
 
 After install (DSH-managed):
@@ -241,10 +158,3 @@ After install (DSH-managed):
 ~/.dsh/.agent-presets/standard-mmx/
 ~/.dsh/cache/web-fetch/                  <- created on first web_fetch call
 ```
-
-## Compatibility
-
-- DSH >=0.1.0-rc.6, Node >=18.0.0
-- install.py: Python ≥ 3.10
-- web-fetch-local: Python >=3.10, optional `extruct` and `brotli`
-- web-search-mmx: `mmx` CLI on `PATH` (OAuth via `mmx auth login`)
