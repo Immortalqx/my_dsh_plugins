@@ -360,8 +360,8 @@ def fetch(url: str, max_bytes: int, timeout: int) -> dict:
 
     if max_bytes < 1024:
         return {"ok": False, "url": url, "error": f"max_bytes must be >= 1024, got {max_bytes}"}
-    if max_bytes > 2_000_000:
-        return {"ok": False, "url": url, "error": f"max_bytes must be <= 2000000, got {max_bytes}"}
+    if max_bytes > 64_000_000:
+        return {"ok": False, "url": url, "error": f"max_bytes must be <= 64000000, got {max_bytes}"}
 
     req = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
@@ -472,8 +472,8 @@ def fetch(url: str, max_bytes: int, timeout: int) -> dict:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="DSH web_fetch_local v2 backing")
     ap.add_argument("--url", required=True, help="http(s) URL to fetch")
-    ap.add_argument("--max-bytes", type=int, default=500_000,
-                    help="Hard byte cap per call (1024..2000000). Default 500000.")
+    ap.add_argument("--max-bytes", type=int, default=64_000_000,
+                    help="Hard byte cap per call (1024..64000000). Default 64000000.")
     ap.add_argument("--timeout", type=int, default=15,
                     help="Socket timeout seconds (default 15)")
     ns = ap.parse_args(argv)

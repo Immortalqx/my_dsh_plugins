@@ -47,10 +47,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const exec = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
 
-const DEFAULT_MAX_BYTES = 500_000
-const HARD_MAX_BYTES = 2_000_000
-const HARD_MIN_BYTES = 5_000
-const DEFAULT_TIMEOUT_MS = 25_000  // subprocess timeout; fetch.py default is 15s
+const DEFAULT_MAX_BYTES = 64_000_000   // 64 MB compressed → ~200-300 MB HTML after gzip
+const HARD_MAX_BYTES = 64_000_000     // 64 MB compressed safety cap (fetch.py rejects above this)
+const HARD_MIN_BYTES = 5_000          // unused; fetch.py enforces 1024 lower bound
+const DEFAULT_TIMEOUT_MS = 25_000     // subprocess timeout; fetch.py default is 15s
 
 // Pick the Python interpreter. Resolution order:
 //   1. `DSH_WEB_FETCH_PYTHON` env var (power-user override; e.g. `py` on
@@ -446,9 +446,8 @@ export function apply(ctx) {
       if (!url) throw new Error('url must be a non-empty string')
       if (!/^https?:\/\//i.test(url)) throw new Error('url must start with http:// or https://')
 
-      // Byte cap is fixed (LLM cannot tune). 500KB covers ~99% of pages;
-      // for the rare oversized page the cache file still gets the full
-      // DEFAULT_MAX_BYTES worth of body and the inline preview is truncated.
+      // Byte cap is fixed (LLM cannot tune). 64 MB compressed covers arxiv
+      // HTML survey papers and other large pages; only `url` is exposed.
       const maxBytes = DEFAULT_MAX_BYTES
 
       const scriptPath = join(HERE, 'fetch.py')
@@ -463,7 +462,7 @@ export function apply(ctx) {
       try {
         const { stdout } = await exec(PYTHON_BIN, cmdArgs, {
           timeout: DEFAULT_TIMEOUT_MS,
-          maxBuffer: 16 * 1024 * 1024,
+          maxBuffer: 64 * 1024 * 1024,  // 64 MB stdout buffer; matches DEFAULT_MAX_BYTES
           signal: execCtx.signal,
           windowsHide: true,
         })
