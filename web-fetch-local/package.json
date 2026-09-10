@@ -1,11 +1,12 @@
 {
   "name": "dsh-web-fetch-local",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "`web_fetch` tool backed by local Python urllib (HTTP + SSRF + JSON-LD) and Node-side Turndown + GFM (HTML→Markdown). Reuses DSH's bundled turndown via install.py junction bridge.",
   "type": "module",
   "main": "src/index.mjs",
   "scripts": {
-    "test": "python src/fetch.py --url https://github.com 2>&1 | python -c \"import sys,json; r=json.loads(sys.stdin.read().splitlines()[0]); assert r['ok']==True, r; print('SSRF-blocked test OK')\""
+    "test": "node ../tools/verify-contract.mjs --smoke",
+    "test:fetch": "python src/fetch.py --url https://github.com"
   },
   "peerDependencies": {
     "turndown": "^7.0.0",
@@ -13,13 +14,13 @@
   },
   "peerDependenciesMeta": {
     "turndown": {
-      "comment": "Provided by DSH itself (`@deepseek-ai/dsh` declares it as a dep). install.py creates a directory junction `~/.dsh/plugins/web-fetch-local/node_modules` -> DSH's node_modules so Node module resolution finds them. If the junction is missing, the tool degrades to text-only mode."
+      "comment": "Provided by DSH itself (`@deepseek-ai/dsh` ships it). install.py creates a directory junction `~/.dsh/plugins/web-fetch-local/node_modules` -> the DSH package's node_modules so Node module resolution finds it. If the junction is missing, the tool degrades to text-only mode."
     },
     "@joplin/turndown-plugin-gfm": {
       "comment": "Provided by DSH itself. Same junction mechanism as `turndown`."
     }
   },
-  "optionalDependencies_comment": "Python `extruct` (pip install) is optional. When present, the tool extracts JSON-LD / Microdata / OpenGraph / RDFa / Microformat from the page and surfaces them as `metadata` in the result. When absent, `metadata` is null and the tool degrades gracefully.",
+  "optionalDependencies_comment": "Python `extruct` and `brotli` (pip install) are optional. With `extruct`, the tool extracts JSON-LD / Microdata / OpenGraph / RDFa / Microformat from the page and surfaces them as `metadata`; without it `metadata` is null. With `brotli`, `br`-encoded responses decode; without it they report a decode error. Both degrade gracefully.",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"

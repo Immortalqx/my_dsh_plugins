@@ -7,6 +7,21 @@
 // Args                     : `{ url }`
 // Output                   : see execute() return shape below.
 //
+// Interface note (DSH >= 0.1.5): the shipped `web_fetch` still takes a single
+// `url`, so this plugin's argument surface is unchanged by the 0.1.5 upgrade.
+// What differs from the shipped tool is deliberate and documented in the
+// README: this one returns a ~2000-char inline preview plus the path of a
+// cache file holding the whole converted page, instead of truncated plain
+// text; and it surfaces structured data (JSON-LD / OpenGraph / Microdata /
+// RDFa / Microformat) when `extruct` is installed.
+//
+// Schema pipeline note: `defineTool()` from `@deepseek-ai/dsh-tools` compiles
+// the `parameters` spec and the `output.schema` spec (a restricted DSL, not
+// raw JSON Schema: every object node needs an explicit boolean
+// `additionalProperties`, `oneOf` needs >= 2 branches, a value root may not
+// carry `required`). `node tools/verify-contract.mjs` re-checks all of that
+// against the installed DSH; run it after every DSH upgrade.
+//
 // Architecture:
 //   [Node] index.mjs ─→ spawns Python subprocess ─→ [Python] fetch.py
 //     1. Python: HTTP + SSRF + Content-Type gate + charset decode +
@@ -23,18 +38,21 @@
 //   - One subprocess boundary; no IPC round-trip during conversion.
 //
 // Why a junction bridge?
-//   DSH installs `turndown`, `@joplin/turndown-plugin-gfm`, and
-//   `@deepseek-ai/dsh-tools` under
-//   `<DSH root>/node_modules/@deepseek-ai/dsh/node_modules/`. Node module
-//   resolution walks up from the plugin's `index.mjs` looking for a
-//   `node_modules/` directory — but it cannot see into nested
-//   `@deepseek-ai/dsh/node_modules/` from our plugin path. `install.py`
-//   creates a directory junction so Node finds them. If the junction is
-//   missing (e.g., user skipped install.py), the tool degrades to plain-text
-//   extraction via stdlib HTMLParser in fetch.py (still returns valid
-//   Markdown-ish content with format="text-degraded" in the result), and
-//   the `import { defineTool } from '@deepseek-ai/dsh-tools'` line throws
-//   `ERR_MODULE_NOT_FOUND` (the plugin fails to load).
+//   DSH ships `turndown`, `@joplin/turndown-plugin-gfm` and
+//   `@deepseek-ai/dsh-tools` inside its own installed package, under
+//   `<DSH package>/node_modules/` (with the `@deepseek-ai/*` plugin packages
+//   one level deeper, at `<DSH package>/node_modules/@deepseek-ai/`). Node
+//   module resolution walks up from this plugin's `index.mjs` looking for a
+//   `node_modules/` directory, and nothing on that path is DSH's own tree.
+//   `install.py` therefore creates a directory junction at
+//   `~/.dsh/plugins/<plugin>/node_modules` pointing at
+//   `<DSH package>/node_modules`, which makes every one of those bare
+//   specifiers resolve. If the junction is missing (e.g. the user copied the
+//   plugin by hand), the tool degrades to plain-text extraction via the stdlib
+//   HTMLParser in fetch.py (still valid content, but `format="text-degraded"`),
+//   and the `import { defineTool } from '@deepseek-ai/dsh-tools'` line throws
+//   `ERR_MODULE_NOT_FOUND`, so the plugin fails to load at all.
+//   `node tools/verify-contract.mjs` checks exactly this resolution.
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -48,8 +66,6 @@ const exec = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 const DEFAULT_MAX_BYTES = 64_000_000   // 64 MB compressed → ~200-300 MB HTML after gzip
-const HARD_MAX_BYTES = 64_000_000     // 64 MB compressed safety cap (fetch.py rejects above this)
-const HARD_MIN_BYTES = 5_000          // unused; fetch.py enforces 1024 lower bound
 const DEFAULT_TIMEOUT_MS = 25_000     // subprocess timeout; fetch.py default is 15s
 
 // Pick the Python interpreter. Resolution order:

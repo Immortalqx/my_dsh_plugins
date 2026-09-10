@@ -3,7 +3,8 @@
 
 Copies the plugin source dirs and the agent preset into the DSH home
 (`~/.dsh/`). The preset ships with two ``__PLUGIN_PATH_*__`` placeholders
-that install.py substitutes with absolute paths at install time.
+that install.py substitutes with absolute paths at install time, so nothing
+has to be edited by hand after a DSH upgrade.
 
 For each plugin, install.py also:
 
@@ -14,10 +15,17 @@ For each plugin, install.py also:
     plugin that calls `defineTool()`) or, for `web-fetch-local`, DSH's
     `turndown` and `@joplin/turndown-plugin-gfm`. The junction uses
     `mklink /J` on Windows (no admin required) and `os.symlink` on POSIX.
-  - Recommends `pip install extruct` for `web-fetch-local` (structured-data
+  - Recommends the optional Python deps for `web-fetch-local` (structured-data
     extraction: JSON-LD, OpenGraph, Microdata, RDFa, Microformat). Without
-    extruct, `metadata` in the tool result is `null` and `metadataKind` is
-    `"none"`.
+    `extruct`, `metadata` in the tool result is `null` and `metadataKind` is
+    `"none"`; without `brotli`, `br`-encoded responses cannot be decoded.
+
+Finally it runs `tools/verify-contract.mjs` against the installed plugins
+(`--no-verify` to skip): that probe re-checks the model-facing tool schemas
+against the *installed* `@deepseek-ai/dsh-tools` compiler, which is the part
+of a DSH upgrade most likely to break a plugin silently. See
+`tools/rebase_preset.py` for the other half — regenerating the preset from the
+shipped `standard` composition after a DSH upgrade.
 
 Designed to be:
 
@@ -31,12 +39,14 @@ Usage:
     python install.py --dry-run        # print plan, write nothing
     python install.py --source <dir>   # override source repo root
     python install.py --target-home <dir>  # override $HOME (for testing)
+    python install.py --no-verify      # skip the post-install contract probe
 
 Requires Python >= 3.10.
 """
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -64,7 +74,7 @@ PLUGIN_PATH_PLACEHOLDERS = {
 # Plugin-specific optional dependencies (Python). Soft-imported at runtime;
 # install.py recommends them but does NOT fail if `pip install` cannot run.
 PLUGIN_PYTHON_DEPS = {
-    "web-fetch-local": ["extruct"],
+    "web-fetch-local": ["extruct", "brotli"],
 }
 
 # Plugin-specific Node modules to bridge from DSH's bundled node_modules into
@@ -121,20 +131,22 @@ def resolve_paths(source_root: Path, target_home: Path):
     """Compute every absolute path the installer needs."""
     plugins_dir = target_home / DSH_HOME_SUBDIR / PLUGINS_DIRNAME
     preset_dest = target_home / DSH_HOME_SUBDIR / PRESETS_DIRNAME / PRESET_NAME
-    # DSH's bundled node_modules (where its npm package deps live, including
-    # turndown). `<DSH root>` is the parent of the .dsh/ home directory.
-    dsh_root_node_modules = _find_dsh_root_node_modules(target_home)
-    return plugins_dir, preset_dest, dsh_root_node_modules
+    # DSH's installed package, whose bundled node_modules/ holds its npm deps
+    # (including turndown and @deepseek-ai/dsh-tools).
+    dsh_package = _find_dsh_package()
+    dsh_node_modules = (dsh_package / "node_modules") if dsh_package else None
+    return plugins_dir, preset_dest, dsh_node_modules, dsh_package
 
 
-def _find_dsh_root_node_modules(target_home: Path) -> Path | None:
-    """Locate the directory containing `node_modules/@deepseek-ai/dsh/...`.
+def _find_dsh_package() -> Path | None:
+    """Locate the installed `@deepseek-ai/dsh` package directory.
 
-    On a typical npm install, this is `target_home/../AppData/Roaming/npm/`
-    on Windows (where `npm install -g @deepseek-ai/dsh` lands) or
-    `/usr/local/lib/node_modules/` on POSIX. We probe a few known locations
-    and return the first one that has a `@deepseek-ai/dsh/node_modules/`
-    subdirectory.
+    On a typical npm install this is
+    `~/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh` on Windows (where
+    `npm install -g @deepseek-ai/dsh` lands) or
+    `/usr/local/lib/node_modules/@deepseek-ai/dsh` on POSIX. We probe a few
+    known locations and return the first one that carries both a package
+    manifest and a bundled `node_modules/` directory.
 
     Returns None when nothing matches — install.py then skips the junction
     step and the plugin degrades gracefully to text-only output.
@@ -149,9 +161,24 @@ def _find_dsh_root_node_modules(target_home: Path) -> Path | None:
         candidates.append(Path("/opt/homebrew/lib/node_modules"))
     for cand in candidates:
         dsh_pkg = cand / "@deepseek-ai" / "dsh"
-        if dsh_pkg.is_dir() and (dsh_pkg / "node_modules").is_dir():
-            return dsh_pkg / "node_modules"
+        if (dsh_pkg / "package.json").is_file() and (dsh_pkg / "node_modules").is_dir():
+            return dsh_pkg
     return None
+
+
+def read_dsh_version(dsh_package: Path | None) -> str:
+    """The installed DSH version, or a placeholder when it cannot be read.
+
+    Printed at install time so the log records which release the plugins were
+    installed against — the fact that matters when a tool later misbehaves.
+    """
+    if dsh_package is None:
+        return "(not found)"
+    try:
+        import json
+        return json.loads((dsh_package / "package.json").read_text(encoding="utf-8"))["version"]
+    except Exception:
+        return "(unreadable)"
 
 
 # ---- plugin dirs: force-overwrite copy ------------------------------------
@@ -162,16 +189,22 @@ def install_dir(source: Path, dest: Path, dry_run: bool) -> None:
     Wiping first sidesteps the `cp -r src dst` nesting bug: even if a prior
     broken install left `dest/foo/` with a stale nested `dest/foo/foo/`, the
     rmtree below removes it cleanly before the fresh copy.
+
+    `node_modules` and `__pycache__` are never copied: the junction (and any
+    stray Python bytecode) is per-installation state that `copytree` would
+    otherwise follow into DSH's own node_modules — a multi-hundred-megabyte
+    recursive copy.
     """
     if not source.is_dir():
         fatal(f"source dir does not exist: {source}")
+    ignore = shutil.ignore_patterns("node_modules", "__pycache__", "*.pyc")
     if dest.exists():
         log(f"  rm    {dest}")
         if not dry_run:
             shutil.rmtree(dest)
     log(f"  cp -r {source} -> {dest}")
     if not dry_run:
-        shutil.copytree(source, dest)
+        shutil.copytree(source, dest, ignore=ignore)
 
 
 # ---- plugin-specific: node_modules junction + python deps ---------------
@@ -240,9 +273,12 @@ def recommend_python_deps(plugin_name: str, deps: list[str], dry_run: bool) -> N
     """
     if not deps:
         return
-    cmd = f"  pip install {' '.join(deps)}"
     log(f"  note  {plugin_name} recommends Python deps: {', '.join(deps)}")
-    log(cmd)
+    log(f"        into the per-user venv the plugin auto-discovers:")
+    log(f"          python -m venv ~/.dsh/venv")
+    venv_py = "~/.dsh/venv/Scripts/python.exe" if is_windows() else "~/.dsh/venv/bin/python"
+    log(f"          {venv_py} -m pip install {' '.join(deps)}")
+    log(f"        without them the tool still works, with degraded metadata/encoding")
 
 
 # ---- preset: copy with placeholder substitution ---------------------------
@@ -251,8 +287,10 @@ def render_preset(source_yml: Path, plugins_dir: Path, dry_run: bool) -> str:
     """Return the agent.cordis.yml text with __PLUGIN_PATH_*__ substituted.
 
     Each placeholder is replaced with the absolute path of
-    `plugins_dir/<plugin>/src/index.mjs`. Missing placeholders are reported
-    but not fatal.
+    `plugins_dir/<plugin>/src/index.mjs`. A placeholder the template no longer
+    carries is reported as a note; a placeholder that survives substitution is
+    fatal, because the row's `name:` would then not resolve and the roster
+    would report the whole preset broken at session start.
     """
     text = source_yml.read_text(encoding="utf-8")
     missing = []
@@ -267,6 +305,17 @@ def render_preset(source_yml: Path, plugins_dir: Path, dry_run: bool) -> str:
         log(
             f"  note  placeholders not found in {source_yml.name} "
             f"(template may have been edited): {', '.join(missing)}"
+        )
+    leftover = re.search(r"__PLUGIN_PATH_[A-Z0-9_]*__", text)
+    if leftover is not None:
+        line = next(
+            (l.strip() for l in text.splitlines() if leftover.group(0) in l), ""
+        )
+        fatal(
+            f"{source_yml} still carries an unsubstituted {leftover.group(0)} "
+            f"placeholder after rendering ({line!r}). Add it to "
+            f"PLUGIN_PATH_PLACEHOLDERS in install.py, or regenerate the file "
+            f"with `python tools/rebase_preset.py`."
         )
     return text
 
@@ -325,7 +374,51 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Override $HOME (default: actual user home). Useful for testing.",
     )
+    p.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip the post-install tools/verify-contract.mjs probe.",
+    )
     return p.parse_args(argv)
+
+
+def verify_install(source_root: Path, target_home: Path, dry_run: bool) -> None:
+    """Run tools/verify-contract.mjs against the install we just wrote.
+
+    That probe re-compiles both tool definitions with the installed
+    `@deepseek-ai/dsh-tools` and checks the model-facing schemas, so a DSH
+    upgrade that changed the schema compiler is caught here rather than by a
+    broken tool call later. Best-effort: a missing node or a missing probe
+    prints a note instead of failing an otherwise good install.
+    """
+    probe = source_root / "tools" / "verify-contract.mjs"
+    if not probe.is_file():
+        log("  note  tools/verify-contract.mjs not found; skipping contract probe")
+        return
+    node = shutil.which("node")
+    if node is None:
+        log("  note  node not on PATH; skipping contract probe")
+        return
+    dsh_home = target_home / DSH_HOME_SUBDIR
+    log(f"  run   node {probe.relative_to(source_root)} --dsh-home {dsh_home}")
+    if dry_run:
+        return
+    result = subprocess.run(
+        [node, str(probe), "--dsh-home", str(dsh_home)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    tail = (result.stdout or "").strip().splitlines()
+    for line in tail[-6:]:
+        log(f"        {line}")
+    if result.returncode != 0:
+        log("")
+        log("  WARNING: the contract probe reported failures (see above).")
+        log("           The plugins are installed, but their model-facing tool")
+        log("           schemas did not verify against this DSH version. Fix the")
+        log("           plugin sources, re-run install.py, and do not rely on the")
+        log("           tools until the probe passes.")
+        return
+    log("  ok    contract probe passed")
 
 
 def main(argv=None) -> int:
@@ -343,16 +436,18 @@ def main(argv=None) -> int:
     if not source_root.is_dir():
         fatal(f"--source is not a directory: {source_root}")
 
-    plugins_dir, preset_dest, dsh_node_modules = resolve_paths(source_root, target_home)
+    plugins_dir, preset_dest, dsh_node_modules, dsh_package = resolve_paths(source_root, target_home)
 
     log(f"DSH home:    {target_home}")
+    log(f"DSH install: {dsh_package if dsh_package else '(not found — junction will be skipped)'}")
+    log(f"DSH version: {read_dsh_version(dsh_package)}")
     log(f"Source root: {source_root}")
     log(f"Platform:    {sys.platform}  ({'windows' if is_windows() else 'posix'})")
     log(f"Mode:        {'DRY-RUN' if args.dry_run else 'APPLY'}")
     log("")
 
     # 1. Plugin source dirs.
-    log("[1/2] plugin sources -> ~/.dsh/plugins/")
+    log("[1/3] plugin sources -> ~/.dsh/plugins/")
     for src_name in PLUGIN_SOURCES:
         plugin_dest = plugins_dir / src_name
         install_dir(source_root / src_name, plugin_dest, args.dry_run)
@@ -367,15 +462,24 @@ def main(argv=None) -> int:
 
     # 2. Agent preset.
     log("")
-    log("[2/2] agent preset -> ~/.dsh/.agent-presets/standard-mmx/")
+    log("[2/3] agent preset -> ~/.dsh/.agent-presets/standard-mmx/")
     install_preset(source_root, preset_dest, plugins_dir, args.dry_run)
+
+    # 3. Contract probe (the part that catches a DSH schema-compiler change).
+    log("")
+    log("[3/3] contract probe")
+    if args.no_verify:
+        log("  skip  --no-verify")
+    else:
+        verify_install(source_root, target_home, args.dry_run)
 
     log("")
     log("Done.")
     log("In the browser: F5, then Settings -> Agent preset -> custom -> pick")
     log("'Standard (mmx)'.")
     log("")
-    log("Optional: pip install extruct  (for JSON-LD / OpenGraph extraction).")
+    log("If the DSH version above is newer than the one this preset mirrors,")
+    log("re-derive the preset first:  python tools/rebase_preset.py")
     return 0
 
 
