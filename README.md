@@ -1,8 +1,8 @@
 # my_dsh_plugins
 
-Local `web_search` (via `mmx` CLI, MiniMax OAuth) and `web_fetch` (Python urllib + Node Turndown) plugins for DSH, scoped to the `standard-mmx` agent preset only.
+Local `web_search` (via `mmx` CLI, MiniMax OAuth) and `web_fetch` (Python urllib + Node Turndown) plugins for DSH, delivered as the `standard-mmx` agent preset.
 
-Validated against **`@deepseek-ai/dsh` 0.1.5-rc.1**. Each DSH release changes the preset and tool-schema contracts this repo depends on, so a tree that works on one release can fail to mount on the next — see [Versioning](#versioning) for which tag to check out.
+Validated against **`@deepseek-ai/dsh` 0.2.0-rc.2**. Each DSH release changes the preset and tool-schema contracts this repo depends on, so a tree that works on one release can fail to mount on the next — see [Versioning](#versioning) for which tag to check out.
 
 ## Install
 
@@ -14,9 +14,20 @@ Writes three locations under `~/.dsh/`:
 
 - `~/.dsh/plugins/web-search-mmx/`
 - `~/.dsh/plugins/web-fetch-local/`
-- `~/.dsh/.agent-presets/standard-mmx/`
+- `~/.dsh/bundles/standard-mmx/` — the preset Bundle (see below)
 
-then runs `tools/verify-contract.mjs` against what it just wrote and reports the result. Does **not** touch `~/.dsh/profiles/web/`, `~/.dsh/settings.yaml`, or any host-scope config. Requires Python ≥ 3.10. After install, the repo is no longer needed at runtime.
+then runs `tools/verify-contract.mjs` against what it just wrote and reports the result. It also removes the stale `~/.dsh/.agent-presets/standard-mmx/` directory left by pre-0.2.0 installs, which DSH no longer scans. Does **not** touch the profile's `cordis.patch.yml`, `~/.dsh/settings.yaml`, or any other host-scope config. Requires Python ≥ 3.10. After install, the repo is no longer needed at runtime.
+
+### Then: install the Bundle (one step)
+
+Since DSH 0.2.0 an agent preset is a Loader row, and Loader rows reach a profile only through a Bundle — which only `plugin_manager` may install. Run once:
+
+```
+plugin_manager action=install_bundle
+                 target=<your home>/.dsh/bundles/standard-mmx
+```
+
+Or use **Plugins** in the sidebar. `install.py` prints the exact path at the end.
 
 Flags:
 
@@ -38,20 +49,21 @@ When `$DSH_HOME` is set, create the venv there instead. On PEP 668 distros (Home
 
 ## Use
 
-1. Refresh the browser (F5) to reload plugins.
+1. Refresh the browser (F5) to load the Bundle.
 2. Settings → Agent preset → pick **"Standard (mmx)"**.
-3. Call `web_search` and `web_fetch` from chat like any other DSH tool — they appear as native tools to the model.
+3. Start a **new** session — the tool schema is assembled at session start, so an existing session keeps the old catalog.
+4. Call `web_search` and `web_fetch` from chat like any other DSH tool — they appear as native tools to the model.
 
 ## Upgrading after a new DSH release
 
 Two things drift when DSH updates, and both are checked into this repo:
 
-1. **The preset** is a copy of the `standard` composition DSH ships, which changes every release (rows are added, config keys renamed — 0.1.5 turned the persona row's `text:` into `prefix:`/`suffix:`, which fails a stale copy at mount). Re-derive it:
+1. **The preset** is a copy of the `standard` composition DSH ships, which changes every release (rows are added, package names replaced — 0.2.0 renamed `workflow-worker-thread` to `workflow-ptc` and added `tool-plugin-manager`, and turned the preset format itself from a directory into a Loader row). Re-derive it:
 
    ```bash
    python tools/rebase_preset.py            # regenerate from the freshly installed DSH
    python tools/rebase_preset.py --check    # exit 1 when the checked-in copy is stale
-   git diff presets/                       # review what upstream changed
+   git diff bundle/                         # review what upstream changed
    ```
 
 2. **The tool-schema contract** is enforced by `@deepseek-ai/dsh-tools`, whose `defineTool()` compiler is strict and versioned. Re-verify both plugins:
@@ -128,7 +140,7 @@ Read metadata:  /Users/.../web-fetch_4d163095.txt lines X-Y
 
 ## How this differs from DSH defaults
 
-| | `standard-mmx` (this repo) | DSH 0.1.5 default |
+| | `standard-mmx` (this repo) | DSH 0.2.0 default |
 |---|---|---|
 | `web_search` backend | `mmx` CLI (MiniMax OAuth) | `@deepseek-ai/dsh-web-search-deepseek` (`DEEPSEEK_API_KEY`) |
 | `web_search` arguments | `queries: string[]`, 1–4 | `queries: string[]`, 1–4 |
@@ -138,7 +150,7 @@ Read metadata:  /Users/.../web-fetch_4d163095.txt lines X-Y
 | `web_fetch` result | ~2000-char preview + full page in a cache file with line ranges | truncated plain text |
 | Structured data | JSON-LD / OpenGraph / Microdata / RDFa / Microformat via `extruct` | not extracted |
 
-The `standard-mmx` preset registers the local tools and disables the shipped `@deepseek-ai/dsh-tool-web` row (which provides both `web_search` and `web_fetch`) **only inside the preset's sessions**. Other presets and default sessions continue to use DSH's official tools. The host-scope config under `~/.dsh/profiles/web/` and `~/.dsh/settings.yaml` is untouched.
+The `standard-mmx` preset disables the shipped `@deepseek-ai/dsh-tool-web` row (which provides both `web_search` and `web_fetch`) **inside its own sessions only**. Other presets and default sessions continue to use DSH's official tools. The only host-plane row this repo adds is the preset *declaration* itself, which mounts nothing on its own; the profile's `cordis.patch.yml`, `~/.dsh/settings.yaml`, and all other host-scope config are untouched.
 
 ## Configuration
 
@@ -161,7 +173,7 @@ python tools/rebase_preset.py --check     # is the preset still in sync with the
 
 ## Prerequisites
 
-- DSH **0.1.5-rc.1** (the preset is derived from that release's shipped `standard` composition)
+- DSH **0.2.0-rc.2** or newer (the preset Bundle is a Loader row; pre-0.2.0 used the directory-based preset format this repo no longer writes)
 - Node ≥ 18.0.0
 - `install.py` / `tools/rebase_preset.py`: Python ≥ 3.10
 - `web-search-mmx`: `mmx` CLI on `PATH`, authenticated via `mmx auth login`
@@ -171,17 +183,20 @@ python tools/rebase_preset.py --check     # is the preset still in sync with the
 
 This repo carries no single version number — its two plugin packages version independently, and what actually matters is which DSH release the tree was validated against. Tags name exactly that:
 
-| Tag | DSH release | `web_search` arguments |
-|---|---|---|
-| `dsh-0.1.0-rc.7` | 0.1.0-rc.7 | `query: string` |
-| `dsh-0.1.5-rc.1` | 0.1.5-rc.1 | `queries: string[]` |
+| Tag | DSH release | Preset delivery | `web_search` arguments |
+|---|---|---|---|
+| `dsh-0.1.0-rc.7` | 0.1.0-rc.7 | directory `agent.cordis.yml` | `query: string` |
+| `dsh-0.1.5-rc.1` | 0.1.5-rc.1 | directory `agent.cordis.yml` | `queries: string[]` |
+| `dsh-0.2.0-rc.2` | 0.2.0-rc.2 | Bundle declaration row | `queries: string[]` |
 
 `main` tracks the newest supported release and matches the newest tag above. To run an older tree against the DSH release it belongs to:
 
 ```bash
-git checkout dsh-0.1.0-rc.7
+git checkout dsh-0.1.5-rc.1
 python install.py
 ```
+
+Note that a pre-0.2.0 tree and a 0.2.0+ tree are not interchangeable: the 0.2.0 release removed filesystem preset discovery entirely, so an older tree's preset simply will not appear in the preset roster.
 
 ## Layout
 
@@ -191,9 +206,11 @@ This repo (install source):
 my_dsh_plugins/
 - README.md
 - install.py
-- presets/standard-mmx/{agent.cordis.yml, preset.yml}   <- agent.cordis.yml is generated
-- tools/rebase_preset.py                                <- regenerates the preset from DSH
-- tools/verify-contract.mjs                             <- re-checks the tool schemas
+- bundle/                                       <- the preset Bundle
+  - package.json                                <- dsh.bundle.patch: ["./cordis.patch.yml"]
+  - cordis.patch.yml                            <- generated; carries __PLUGIN_PATH_*__
+- tools/rebase_preset.py                        <- regenerates the bundle from DSH
+- tools/verify-contract.mjs                     <- re-checks the tool schemas
 - web-search-mmx/{package.json, src/index.mjs}
 - web-fetch-local/{package.json, src/{index.mjs, fetch.py}}
 ```
@@ -206,6 +223,28 @@ After install (DSH-managed):
 - web-fetch-local/
     - node_modules/                       <- junction to the DSH package's node_modules
     - src/...
-~/.dsh/.agent-presets/standard-mmx/
-~/.dsh/cache/web-fetch/                  <- created on first web_fetch call
+~/.dsh/bundles/standard-mmx/              <- the preset Bundle installed into the profile
+~/.dsh/cache/web-fetch/                   <- created on first web_fetch call
 ```
+
+## How the preset reaches DSH
+
+```
+tools/rebase_preset.py
+  reads  <DSH>/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml
+  copies the `config.plugins` list verbatim            (19 upstream rows)
+  applies 3 deltas                                     (header / tool-web disabled / +2 local rows)
+  writes bundle/cordis.patch.yml                       (21 rows)
+
+install.py
+  substitutes __PLUGIN_PATH_*__ -> file:///<abs path>/src/index.mjs
+  writes ~/.dsh/bundles/standard-mmx/
+
+plugin_manager install_bundle
+  puts the declaration row into the profile's Loader tree
+
+session start
+  picks "Standard (mmx)" -> mounts the 21 rows in an isolated scope
+```
+
+Only the declaration row is host-plane. The 21 rows mount per session, which is what confines MiniMax billing to sessions that opt in.

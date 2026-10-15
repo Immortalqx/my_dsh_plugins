@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """install.py — cross-platform installer for my_dsh_plugins.
 
-Copies the plugin source dirs and the agent preset into the DSH home
-(`~/.dsh/`). The preset ships with two ``__PLUGIN_PATH_*__`` placeholders
-that install.py substitutes with absolute paths at install time, so nothing
-has to be edited by hand after a DSH upgrade.
+Copies the plugin source dirs into the DSH home (`~/.dsh/`) and renders the
+`standard-mmx` agent-preset Bundle next to them. The Bundle ships one
+`@deepseek-ai/dsh-agent-preset` declaration row whose `config.plugins` list is
+the shipped `standard` composition with three local deltas; the two plugin rows
+inside it carry `__PLUGIN_PATH_*__` placeholders that install.py substitutes
+with absolute paths at install time, so nothing has to be edited by hand after
+a DSH upgrade.
 
 For each plugin, install.py also:
 
@@ -24,15 +27,26 @@ Finally it runs `tools/verify-contract.mjs` against the installed plugins
 (`--no-verify` to skip): that probe re-checks the model-facing tool schemas
 against the *installed* `@deepseek-ai/dsh-tools` compiler, which is the part
 of a DSH upgrade most likely to break a plugin silently. See
-`tools/rebase_preset.py` for the other half — regenerating the preset from the
-shipped `standard` composition after a DSH upgrade.
+`tools/rebase_preset.py` for the other half — regenerating the preset Bundle
+from the shipped `standard` composition after a DSH upgrade.
+
+One step install.py cannot do for you
+--------------------------------------
+Since DSH 0.2.0 an agent preset is a Loader row, and Loader rows reach a
+profile through a Bundle — which only `plugin_manager install_bundle` may
+install. install.py therefore renders the Bundle and prints the exact call;
+run it once (or install from the Plugins page in the sidebar). Everything else
+— plugin sources, junctions, cache dir, contract probe — this script owns.
 
 Designed to be:
 
   - Idempotent: re-running produces the same state.
-  - Force-overwriting for files we own: the two plugin dirs and the preset
-    are wiped before being re-copied (so any prior `cp -r src dst` nesting
-    from a broken install is removed cleanly).
+  - Force-overwriting for files we own: the two plugin dirs and the rendered
+    Bundle are wiped before being re-written (so any prior `cp -r src dst`
+    nesting from a broken install is removed cleanly).
+  - Validating before writing: the Bundle patch is rendered and checked for
+    unsubstituted placeholders BEFORE anything is copied to disk, so a broken
+    template cannot leave a half-installed state.
 
 Usage:
     python install.py                  # actually install
@@ -58,14 +72,25 @@ from urllib.parse import quote
 
 DSH_HOME_SUBDIR = ".dsh"
 PLUGINS_DIRNAME = "plugins"
-PRESETS_DIRNAME = ".agent-presets"
-PRESET_NAME = "standard-mmx"
+BUNDLES_DIRNAME = "bundles"
+BUNDLE_NAME = "standard-mmx"
+
+# The agent preset directory that DSH 0.1.x discovered by scanning
+# `~/.dsh/.agent-presets/`. Since 0.2.0 nothing scans it; install.py removes
+# our own stale copy (and only ours) so the dead preset cannot be mistaken for
+# a working one.
+LEGACY_PRESETS_DIRNAME = ".agent-presets"
+LEGACY_PRESET_NAME = "standard-mmx"
 
 # Plugin source directories inside the repo (each ships `package.json` + `src/`).
 PLUGIN_SOURCES = ("web-search-mmx", "web-fetch-local")
 
-# Placeholders in presets/standard-mmx/agent.cordis.yml that install.py
-# substitutes with absolute plugin paths.
+# Bundle source directory inside the repo: `package.json` + generated
+# `cordis.patch.yml`.
+BUNDLE_SOURCE_DIRNAME = "bundle"
+
+# Placeholders in bundle/cordis.patch.yml that install.py substitutes with
+# absolute plugin paths.
 PLUGIN_PATH_PLACEHOLDERS = {
     "__PLUGIN_PATH_WEB_SEARCH_MMX__": "web-search-mmx",
     "__PLUGIN_PATH_WEB_FETCH_LOCAL__": "web-fetch-local",
@@ -118,6 +143,11 @@ def format_plugin_name(abs_path: Path) -> str:
                  (forward slashes, URL-encoded `:`).
     POSIX     -> `/Users/you/.dsh/plugins/.../index.mjs`
                  (bare absolute path, no scheme).
+
+    DSH's Loader hands a non-`cordis:`, non-`.` specifier straight to Node's
+    `import()`, and Node ESM resolves an absolute `file:` URL natively
+    (percent-decoding it) as well as a POSIX absolute path. Verified unchanged
+    in 0.2.0-rc.2.
     """
     posix = abs_path.as_posix()  # always forward slashes
     if is_windows():
@@ -129,13 +159,15 @@ def format_plugin_name(abs_path: Path) -> str:
 
 def resolve_paths(source_root: Path, target_home: Path):
     """Compute every absolute path the installer needs."""
-    plugins_dir = target_home / DSH_HOME_SUBDIR / PLUGINS_DIRNAME
-    preset_dest = target_home / DSH_HOME_SUBDIR / PRESETS_DIRNAME / PRESET_NAME
+    dsh_home = target_home / DSH_HOME_SUBDIR
+    plugins_dir = dsh_home / PLUGINS_DIRNAME
+    bundle_dest = dsh_home / BUNDLES_DIRNAME / BUNDLE_NAME
+    legacy_preset = dsh_home / LEGACY_PRESETS_DIRNAME / LEGACY_PRESET_NAME
     # DSH's installed package, whose bundled node_modules/ holds its npm deps
     # (including turndown and @deepseek-ai/dsh-tools).
     dsh_package = _find_dsh_package()
     dsh_node_modules = (dsh_package / "node_modules") if dsh_package else None
-    return plugins_dir, preset_dest, dsh_node_modules, dsh_package
+    return plugins_dir, bundle_dest, legacy_preset, dsh_node_modules, dsh_package
 
 
 def _find_dsh_package() -> Path | None:
@@ -281,16 +313,20 @@ def recommend_python_deps(plugin_name: str, deps: list[str], dry_run: bool) -> N
     log(f"        without them the tool still works, with degraded metadata/encoding")
 
 
-# ---- preset: copy with placeholder substitution ---------------------------
+# ---- bundle: render the patch with plugin paths substituted ---------------
 
-def render_preset(source_yml: Path, plugins_dir: Path, dry_run: bool) -> str:
-    """Return the agent.cordis.yml text with __PLUGIN_PATH_*__ substituted.
+def render_bundle_patch(source_yml: Path, plugins_dir: Path, dry_run: bool) -> str:
+    """Return the Bundle patch text with __PLUGIN_PATH_*__ substituted.
 
     Each placeholder is replaced with the absolute path of
     `plugins_dir/<plugin>/src/index.mjs`. A placeholder the template no longer
     carries is reported as a note; a placeholder that survives substitution is
-    fatal, because the row's `name:` would then not resolve and the roster
-    would report the whole preset broken at session start.
+    fatal, because the row's `name:` would then not resolve and the registry
+    would report the whole preset broken at declaration time.
+
+    The guard matches the placeholder LEXEME (`__PLUGIN_PATH_[A-Z0-9_]*__`),
+    not the bare prefix — a prefix match also hits the explanatory prose in the
+    comments, which made the original guard fatal on a correct file.
     """
     text = source_yml.read_text(encoding="utf-8")
     missing = []
@@ -314,40 +350,61 @@ def render_preset(source_yml: Path, plugins_dir: Path, dry_run: bool) -> str:
         fatal(
             f"{source_yml} still carries an unsubstituted {leftover.group(0)} "
             f"placeholder after rendering ({line!r}). Add it to "
-            f"PLUGIN_PATH_PLACEHOLDERS in install.py, or regenerate the file "
-            f"with `python tools/rebase_preset.py`."
+            "PLUGIN_PATH_PLACEHOLDERS in install.py, or regenerate the file "
+            "with `python tools/rebase_preset.py`."
         )
     return text
 
 
-def install_preset(source_root: Path, preset_dest: Path, plugins_dir: Path,
+def install_bundle(source_root: Path, bundle_dest: Path, plugins_dir: Path,
                    dry_run: bool) -> None:
-    """Copy the preset dir, substituting plugin paths into agent.cordis.yml.
+    """Render the preset Bundle into `bundle_dest`.
 
-    preset.yml is static and copied verbatim. agent.cordis.yml is read,
-    has its ``__PLUGIN_PATH_*__`` placeholders replaced with absolute
-    plugin paths, and written back. Other files (if any) are copied as-is.
+    Reads the repo's `bundle/package.json` and generated
+    `bundle/cordis.patch.yml`, substituting the plugin paths into the patch,
+    and writes both into `bundle_dest`. The rendered patch is validated BEFORE
+    anything is written, so a broken template cannot leave a half-written
+    bundle behind.
     """
-    source_dir = source_root / "presets" / PRESET_NAME
+    source_dir = source_root / BUNDLE_SOURCE_DIRNAME
     if not source_dir.is_dir():
-        fatal(f"preset source dir does not exist: {source_dir}")
-    if preset_dest.exists():
-        log(f"  rm    {preset_dest}")
+        fatal(f"bundle source dir does not exist: {source_dir}\n"
+              "       run `python tools/rebase_preset.py` to generate it")
+
+    rendered = render_bundle_patch(source_dir / "cordis.patch.yml", plugins_dir, dry_run)
+
+    if bundle_dest.exists():
+        log(f"  rm    {bundle_dest}")
         if not dry_run:
-            shutil.rmtree(preset_dest)
-    log(f"  cp -r {source_dir} -> {preset_dest}")
+            shutil.rmtree(bundle_dest)
+    log(f"  cp -r {source_dir} -> {bundle_dest}")
     if dry_run:
         return
-    preset_dest.mkdir(parents=True, exist_ok=True)
-    for entry in source_dir.iterdir():
-        if entry.is_dir():
-            shutil.copytree(entry, preset_dest / entry.name)
-            continue
-        if entry.name == "agent.cordis.yml":
-            rendered = render_preset(entry, plugins_dir, dry_run=False)
-            (preset_dest / entry.name).write_text(rendered, encoding="utf-8")
-        else:
-            shutil.copy2(entry, preset_dest / entry.name)
+    bundle_dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_dir / "package.json", bundle_dest / "package.json")
+    (bundle_dest / "cordis.patch.yml").write_text(rendered, encoding="utf-8")
+
+
+def remove_legacy_preset(legacy_preset: Path, dry_run: bool) -> None:
+    """Delete the DSH 0.1.x preset directory, which 0.2.0 no longer scans.
+
+    Only our own `standard-mmx` directory is touched; the parent
+    `.agent-presets/` is removed too when this was its last entry, and left
+    alone otherwise so any other preset the user keeps is unaffected.
+    """
+    if not legacy_preset.exists():
+        return
+    log(f"  rm    {legacy_preset}   (DSH >= 0.2.0 does not scan .agent-presets/)")
+    if dry_run:
+        return
+    shutil.rmtree(legacy_preset)
+    parent = legacy_preset.parent
+    try:
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            log(f"  rm    {parent}   (now empty)")
+    except OSError:
+        pass
 
 
 # ---- CLI -----------------------------------------------------------------
@@ -436,7 +493,8 @@ def main(argv=None) -> int:
     if not source_root.is_dir():
         fatal(f"--source is not a directory: {source_root}")
 
-    plugins_dir, preset_dest, dsh_node_modules, dsh_package = resolve_paths(source_root, target_home)
+    plugins_dir, bundle_dest, legacy_preset, dsh_node_modules, dsh_package = \
+        resolve_paths(source_root, target_home)
 
     log(f"DSH home:    {target_home}")
     log(f"DSH install: {dsh_package if dsh_package else '(not found — junction will be skipped)'}")
@@ -446,8 +504,17 @@ def main(argv=None) -> int:
     log(f"Mode:        {'DRY-RUN' if args.dry_run else 'APPLY'}")
     log("")
 
+    # 0. Validate the bundle template BEFORE writing anything (see module
+    #    docstring): a bad template must not leave plugins copied but no preset.
+    log("[0/4] validate bundle template")
+    rendered = render_bundle_patch(
+        source_root / BUNDLE_SOURCE_DIRNAME / "cordis.patch.yml", plugins_dir, args.dry_run
+    )
+    log(f"  ok    patch renders, {rendered.count(chr(10))} lines, placeholders substituted")
+    log("")
+
     # 1. Plugin source dirs.
-    log("[1/3] plugin sources -> ~/.dsh/plugins/")
+    log("[1/4] plugin sources -> ~/.dsh/plugins/")
     for src_name in PLUGIN_SOURCES:
         plugin_dest = plugins_dir / src_name
         install_dir(source_root / src_name, plugin_dest, args.dry_run)
@@ -459,27 +526,42 @@ def main(argv=None) -> int:
             )
         if src_name in PLUGIN_PYTHON_DEPS:
             recommend_python_deps(src_name, PLUGIN_PYTHON_DEPS[src_name], args.dry_run)
-
-    # 2. Agent preset.
     log("")
-    log("[2/3] agent preset -> ~/.dsh/.agent-presets/standard-mmx/")
-    install_preset(source_root, preset_dest, plugins_dir, args.dry_run)
+
+    # 2. The preset Bundle, plus removal of the DSH 0.1.x preset directory.
+    log("[2/4] agent preset bundle")
+    install_bundle(source_root, bundle_dest, plugins_dir, args.dry_run)
+    remove_legacy_preset(legacy_preset, args.dry_run)
+    log("")
 
     # 3. Contract probe (the part that catches a DSH schema-compiler change).
-    log("")
-    log("[3/3] contract probe")
+    log("[3/4] contract probe")
     if args.no_verify:
         log("  skip  --no-verify")
     else:
         verify_install(source_root, target_home, args.dry_run)
+    log("")
 
+    # 4. The one step only plugin_manager may perform.
+    log("[4/4] bundle install (run this once)")
+    if args.dry_run:
+        log(f"  would print the install_bundle call for: {bundle_dest}")
+    else:
+        log("  Since DSH 0.2.0 an agent preset is a Loader row, and only")
+        log("  plugin_manager may install a Bundle into this profile:")
+        log("")
+        log("    plugin_manager action=install_bundle")
+        log(f"                     target={bundle_dest}")
+        log("")
+        log("  Or use the Plugins page in the sidebar.")
     log("")
     log("Done.")
-    log("In the browser: F5, then Settings -> Agent preset -> custom -> pick")
-    log("'Standard (mmx)'.")
+    log("After the bundle is installed: Settings -> Agent preset ->")
+    log("'Standard (mmx)', then start a NEW session (the tool schema is")
+    log("assembled at session start; an existing session keeps the old one).")
     log("")
     log("If the DSH version above is newer than the one this preset mirrors,")
-    log("re-derive the preset first:  python tools/rebase_preset.py")
+    log("re-derive it first:  python tools/rebase_preset.py")
     return 0
 
 

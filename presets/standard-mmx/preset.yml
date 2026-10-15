@@ -1,2 +1,0 @@
-name: Standard (mmx)
-description: The shipped `standard` agent preset with web_search on mmx-cli (MiniMax) and web_fetch on a local Python subprocess. Mirrors @deepseek-ai/dsh 0.1.5-rc.1.
